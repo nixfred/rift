@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/rift-hero.png" alt="Application windows passing through a neon dimensional rift and reforming as a tiled workspace" width="100%">
+
 # 󰦛 Rift
 
 ### Your workspaces, remembered. Your apps, back in one click.
