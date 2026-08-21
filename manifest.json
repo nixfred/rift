@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "nixfred.rift",
+  "name": "Rift",
+  "version": "0.1.0",
+  "author": "Fred Nix",
+  "license": "MIT",
+  "description": "Save the applications on a workspace as a named Rift and reopen them on demand or at login \u2014 straight from the Omarchy bar. No geometry saved: Hyprland keeps tiling.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Rift",
+    "description": "Named application workspaces: save, reopen, autostart. Click \udb82\udd9b or use keys N/S/U.",
+    "category": "Productivity",
+    "aliases": [
+      "projects",
+      "workspaces",
+      "sessions",
+      "layouts"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  },
+  "homepage": "https://github.com/nixfred/rift"
+}
