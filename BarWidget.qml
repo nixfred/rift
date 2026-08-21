@@ -33,7 +33,10 @@ BarWidget {
   onBarChanged: injectPanel()
   onSettingsChanged: injectPanel()
 
-  Component.onCompleted: startupProcess.running = true
+  Component.onCompleted: {
+    console.debug("rift: widget loaded, helper:", root.helperPath)
+    startupProcess.running = true
+  }
 
   Loader {
     id: panelLoader
@@ -49,6 +52,9 @@ BarWidget {
   Process {
     id: startupProcess
     command: ["python3", root.helperPath, "startup-open"]
+    stdout: SplitParser { onRead: function(line) { console.debug("rift: startup-open:", line) } }
+    stderr: SplitParser { onRead: function(line) { console.warn("rift: startup-open stderr:", line) } }
+    onExited: function(exitCode) { if (exitCode !== 0) console.warn("rift: startup-open exit", exitCode) }
   }
 
   IpcHandler {

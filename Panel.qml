@@ -50,6 +50,7 @@ Panel {
     if (!helperPath || stateProcess.running) return
     stateOutput = ""
     stateProcess.command = helperCommand(["state"])
+    console.debug("rift: run", JSON.stringify(stateProcess.command))
     stateProcess.running = true
   }
 
@@ -59,6 +60,7 @@ Panel {
     actionOutput = ""
     errorText = ""
     actionProcess.command = helperCommand(args)
+    console.debug("rift: run", JSON.stringify(actionProcess.command))
     actionProcess.running = true
   }
 
@@ -144,14 +146,18 @@ Panel {
   Process {
     id: stateProcess
     stdout: SplitParser { onRead: function(line) { root.stateOutput += line } }
+    stderr: SplitParser { onRead: function(line) { console.warn("rift: helper stderr:", line) } }
     onExited: function(exitCode) {
+      console.debug("rift: state exited", exitCode, "bytes:", root.stateOutput.length)
       try {
         var response = JSON.parse(root.stateOutput)
         if (!response.ok) throw new Error(response.error || "Could not inspect this workspace")
         root.stateData = response.data
+        console.debug("rift: state workspace", response.data.workspace.id, "apps:", response.data.apps.length, "rifts:", response.data.rifts.length, "current:", response.data.currentRift || "-")
         if (root.selectedIndex >= root.rifts.length) root.selectedIndex = Math.max(0, root.rifts.length - 1)
         if (root.mode === "new-loading") root.beginSave("")
       } catch (error) {
+        console.warn("rift: state failed:", String(error.message || error), "raw:", root.stateOutput.slice(0, 300))
         root.errorText = String(error.message || error)
       }
     }
@@ -160,7 +166,9 @@ Panel {
   Process {
     id: actionProcess
     stdout: SplitParser { onRead: function(line) { root.actionOutput += line } }
+    stderr: SplitParser { onRead: function(line) { console.warn("rift: helper stderr:", line) } }
     onExited: function(exitCode) {
+      console.debug("rift: action", root.pendingAction, "exited", exitCode, "raw:", root.actionOutput.slice(0, 300))
       try {
         var response = JSON.parse(root.actionOutput)
         if (!response.ok) throw new Error(response.error || "Rift action failed")
@@ -179,6 +187,7 @@ Panel {
           root.refresh()
         }
       } catch (error) {
+        console.warn("rift: action", root.pendingAction, "failed:", String(error.message || error))
         root.errorText = String(error.message || error)
       }
       root.pendingAction = ""
