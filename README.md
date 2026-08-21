@@ -15,6 +15,8 @@
 omarchy plugin add https://github.com/nixfred/rift.git --enable
 ```
 
+<img src="preview.png" alt="Rift panel in the Omarchy bar — a saved Rift named Hacking, 2 applications, opens at login" width="520">
+
 </div>
 
 ---
@@ -161,7 +163,6 @@ bind = SUPER, R, exec, omarchy-shell nixfred.rift toggle
 - [ ] Delete / rename from the panel (CLI `delete` exists today)
 - [ ] Per-app launch delay & ordering
 - [ ] Optional `exec` override per app in the save panel
-- [ ] Preview screenshot in this README (PRs with one welcome)
 
 ## Contributing
 
