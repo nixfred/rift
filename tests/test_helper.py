@@ -419,6 +419,27 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(rift.desktop_exec_binary("env --split-string editor --flag"), "")
         self.assertEqual(rift.desktop_exec_binary("%F"), "")
 
+    def test_launch_fails_when_recorded_cwd_is_gone(self):
+        app = {
+            "id": "terminal:kitty:/gone:claude",
+            "launch": ["kitty", "--directory", "/gone", "--hold", "claude", "--continue"],
+            "cwd": "/definitely-not-a-rift-directory-xyz",
+        }
+        with patch.object(rift.subprocess, "Popen") as popen:
+            result = rift.launch_app_result(app, {"name": "Nova", "slug": "nova"})
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("no longer exists", result["error"])
+        popen.assert_not_called()
+
+    def test_launch_without_recorded_cwd_still_uses_home(self):
+        with patch.object(rift.subprocess, "Popen") as popen:
+            result = rift.launch_app_result(
+                {"id": "desktop:code", "launch": ["gtk-launch", "code"]},
+                {"name": "Nova", "slug": "nova"},
+            )
+        self.assertEqual(result["status"], "launched")
+        self.assertEqual(popen.call_args.kwargs["cwd"], str(Path.home()))
+
     def test_unlaunchable_app_does_not_abort_rift(self):
         broken = {"launch": ["missing-app"], "cwd": "", "policy": "launch"}
         working = {"launch": ["working-app"], "cwd": "", "policy": "launch"}
