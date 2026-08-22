@@ -2,6 +2,17 @@
 
 All notable changes to Rift. The version shown in the panel header (`RIFTS vX.Y.Z`) and bar tooltip is the one in `manifest.json`; tests keep them in lockstep.
 
+## v0.3.2 — 2026-08-21 · Capture & save hardening (Codex/Grok PRs #35–#44)
+
+- Foreground program captured via the terminal's **tpgid** (process group), not `/proc` child order — background jobs can't masquerade; `kitty -e claude` (no shell) captured too (#42)
+- Editor folder args resolved against the **editor's** cwd (`code .` no longer records the plugin dir) (#44)
+- A recorded cwd that no longer exists → explicit failed/retryable result, never a silent launch in `$HOME` (#43)
+- Saving refuses to overwrite an existing Rift unless it is an explicit update (#39); refuses empty Rifts (#40)
+- Runtime lock no longer held across workspace switch + launches (#41)
+- Ensure-policy apps only launch after a *confirmed* absence; unknown state is retryable, never a duplicate (#36, closes #14)
+- Save form watches the workspace while you name a new Rift — apps opened meanwhile appear and tick themselves (#35)
+- Keyboard: selection stays visible in long lists; Tab/Shift+Tab hand off to neighbouring popouts correctly (#38)
+
 ## v0.3.1 — 2026-08-21 · Deep terminal capture
 
 - Terminals now record the **shell's real cwd** (walks terminal → shell → foreground program via `/proc`), not the terminal's launch dir
