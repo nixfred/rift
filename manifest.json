@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "nixfred.rift",
   "name": "Rift",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "author": "Fred Nix",
   "license": "MIT",
   "description": "Save the applications on a workspace as a named Rift and reopen them on demand or at login \u2014 straight from the Omarchy bar. No geometry saved: Hyprland keeps tiling.",
