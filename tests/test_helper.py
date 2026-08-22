@@ -216,6 +216,84 @@ class RiftHelperTests(unittest.TestCase):
 
         self.assertEqual(launched, [False, True])
         self.assertEqual(popen.call_count, 2)
+
+    def test_open_rift_keeps_total_failure_retryable(self):
+        saved = {"slug": "nova", "name": "Nova", "apps": [{"id": "missing"}]}
+        runtime = {"signature": "", "open": {}}
+        with patch.object(rift, "load_rift", return_value=saved), patch.object(
+            rift, "runtime_state", return_value=runtime
+        ), patch.object(rift, "save_runtime"), patch.object(
+            rift, "hypr_dispatch"
+        ), patch.object(
+            rift.time, "sleep"
+        ), patch.object(
+            rift, "current_workspace", return_value={"id": 9, "name": "9"}
+        ), patch.object(
+            rift,
+            "launch_app_result",
+            return_value={"app": "missing", "status": "failed", "error": "not found"},
+        ):
+            result = rift.open_rift("nova")
+
+        self.assertEqual(result["action"], "failed")
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(runtime["open"], {})
+
+    def test_open_rift_records_partial_success(self):
+        saved = {"slug": "nova", "name": "Nova", "apps": [{"id": "editor"}, {"id": "missing"}]}
+        runtime = {"signature": "", "open": {}}
+        outcomes = [
+            {"app": "editor", "status": "launched"},
+            {"app": "missing", "status": "failed", "error": "not found"},
+        ]
+        with patch.object(rift, "load_rift", return_value=saved), patch.object(
+            rift, "runtime_state", return_value=runtime
+        ), patch.object(rift, "save_runtime"), patch.object(
+            rift, "hypr_dispatch"
+        ), patch.object(
+            rift.time, "sleep"
+        ), patch.object(
+            rift, "current_workspace", return_value={"id": 9, "name": "9"}
+        ), patch.object(rift, "launch_app_result", side_effect=outcomes):
+            result = rift.open_rift("nova")
+
+        self.assertEqual(result["action"], "partial")
+        self.assertEqual((result["launched"], result["failed"]), (1, 1))
+        self.assertEqual(runtime["open"]["nova"]["workspace_id"], 9)
+        self.assertEqual(runtime["open"]["nova"]["failed_apps"], ["missing"])
+
+    def test_open_rift_retries_failed_apps_on_existing_workspace(self):
+        saved = {"slug": "nova", "name": "Nova", "apps": [{"id": "editor"}, {"id": "missing"}]}
+        runtime = {
+            "signature": "",
+            "open": {"nova": {"workspace_id": 9, "workspace_name": "9", "failed_apps": ["missing"]}},
+        }
+        with patch.object(rift, "load_rift", return_value=saved), patch.object(
+            rift, "runtime_state", return_value=runtime
+        ), patch.object(rift, "save_runtime"), patch.object(
+            rift, "hypr_dispatch"
+        ) as dispatch, patch.object(
+            rift, "launch_app_result", return_value={"app": "missing", "status": "launched"}
+        ) as launch:
+            result = rift.open_rift("nova")
+
+        self.assertEqual(result["action"], "opened")
+        dispatch.assert_called_once_with("workspace", "9")
+        launch.assert_called_once_with(saved["apps"][1], saved)
+        self.assertNotIn("failed_apps", runtime["open"]["nova"])
+
+    def test_partial_startup_does_not_write_completion_marker(self):
+        rift.ensure_dirs()
+        rift.atomic_json(
+            rift.rift_path("nova"),
+            {"schemaVersion": 1, "slug": "nova", "name": "Nova", "startup": True, "apps": []},
+        )
+        signature = rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+        marker = rift.STATE_ROOT / f"startup-{rift.re.sub(r'[^a-zA-Z0-9_.-]', '_', signature)}"
+        with patch.object(rift, "open_rift", return_value={"action": "partial"}):
+            with self.assertRaisesRegex(RuntimeError, "needs retry"):
+                rift.startup_open()
+        self.assertFalse(marker.exists())
     def test_failed_startup_can_be_retried(self):
         rift.ensure_dirs()
         rift.atomic_json(
