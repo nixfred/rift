@@ -666,54 +666,58 @@ def wait_for_workspace_change(previous_id: int, timeout: float = 2.0) -> dict[st
 
 def open_rift(slug: str) -> dict[str, Any]:
     rift = load_rift(slug)
-    with runtime_transaction() as runtime:
-        association = runtime.get("open", {}).get(rift["slug"])
-        if association:
-            hypr_dispatch("workspace", str(association["workspace_id"]))
-            pending = set(association.get("failed_apps", []))
-            if pending:
-                retry_apps = [app for app in rift.get("apps", []) if str(app.get("id", "")) in pending]
-                results = [launch_app_result(app, rift) for app in retry_apps]
-                remaining = [result["app"] for result in results if result["status"] == "failed"]
-                if remaining:
-                    association["failed_apps"] = remaining
-                else:
-                    association.pop("failed_apps", None)
-                launched = sum(result["status"] == "launched" for result in results)
-                return {
-                    "action": "partial" if remaining else "opened",
-                    "rift": rift["slug"],
-                    "workspace": association["workspace_id"],
-                    "launched": launched,
-                    "failed": len(remaining),
-                    "results": results,
-                }
-            return {"action": "focused", "rift": rift["slug"], "workspace": association["workspace_id"]}
-
-        previous_id = int(current_workspace().get("id", 0))
-        hypr_dispatch("workspace", "emptyn")
-        workspace = wait_for_workspace_change(previous_id)
-        workspace_id = int(workspace.get("id", 0))
-        apps = rift.get("apps", [])
-        results = [launch_app_result(app, rift) for app in apps]
-        launched = sum(result["status"] == "launched" for result in results)
-        satisfied = sum(result["status"] in {"launched", "already-running"} for result in results)
-        failed = len(results) - satisfied
-        if apps and satisfied == 0:
+    runtime = runtime_state()
+    association = (runtime.get("open") or {}).get(rift["slug"])
+    if association:
+        hypr_dispatch("workspace", str(association["workspace_id"]))
+        pending = set(association.get("failed_apps", []))
+        if pending:
+            retry_apps = [app for app in rift.get("apps", []) if str(app.get("id", "")) in pending]
+            results = [launch_app_result(app, rift) for app in retry_apps]
+            remaining = [result["app"] for result in results if result["status"] == "failed"]
+            launched = sum(result["status"] == "launched" for result in results)
+            with runtime_transaction() as locked:
+                current = (locked.get("open") or {}).get(rift["slug"])
+                if current is not None:
+                    if remaining:
+                        current["failed_apps"] = remaining
+                    else:
+                        current.pop("failed_apps", None)
             return {
-                "action": "failed",
+                "action": "partial" if remaining else "opened",
                 "rift": rift["slug"],
-                "workspace": workspace_id,
-                "launched": 0,
-                "failed": failed,
+                "workspace": association["workspace_id"],
+                "launched": launched,
+                "failed": len(remaining),
                 "results": results,
             }
-        runtime.setdefault("open", {})[rift["slug"]] = {
+        return {"action": "focused", "rift": rift["slug"], "workspace": association["workspace_id"]}
+
+    previous_id = int(current_workspace().get("id", 0))
+    hypr_dispatch("workspace", "emptyn")
+    workspace = wait_for_workspace_change(previous_id)
+    workspace_id = int(workspace.get("id", 0))
+    apps = rift.get("apps", [])
+    results = [launch_app_result(app, rift) for app in apps]
+    launched = sum(result["status"] == "launched" for result in results)
+    satisfied = sum(result["status"] in {"launched", "already-running"} for result in results)
+    failed = len(results) - satisfied
+    if apps and satisfied == 0:
+        return {
+            "action": "failed",
+            "rift": rift["slug"],
+            "workspace": workspace_id,
+            "launched": 0,
+            "failed": failed,
+            "results": results,
+        }
+    with runtime_transaction() as locked:
+        locked.setdefault("open", {})[rift["slug"]] = {
             "workspace_id": workspace_id,
             "workspace_name": str(workspace.get("name", "")),
         }
         if failed:
-            runtime["open"][rift["slug"]]["failed_apps"] = [
+            locked["open"][rift["slug"]]["failed_apps"] = [
                 result["app"] for result in results if result["status"] == "failed"
             ]
     return {
