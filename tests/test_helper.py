@@ -863,14 +863,40 @@ class RiftHelperTests(unittest.TestCase):
         ), patch.object(rift, "save_runtime"), patch.object(
             rift, "hypr_dispatch"
         ) as dispatch, patch.object(
+            rift, "wait_for_workspace", return_value={"id": 9, "name": "9"}
+        ) as wait, patch.object(
             rift, "launch_app_result", return_value={"app": "missing", "status": "launched"}
         ) as launch:
             result = rift.open_rift("nova")
 
         self.assertEqual(result["action"], "opened")
         dispatch.assert_called_once_with("workspace", "9")
+        wait.assert_called_once_with(9)
         launch.assert_called_once_with(saved["apps"][1], saved)
         self.assertNotIn("failed_apps", runtime["open"]["nova"])
+
+    def test_wait_for_workspace_handles_delayed_transition(self):
+        with patch.object(
+            rift,
+            "current_workspace",
+            side_effect=[{"id": 2, "name": "2"}, {"id": 9, "name": "9"}],
+        ), patch.object(rift.time, "sleep"):
+            self.assertEqual(rift.wait_for_workspace(9), {"id": 9, "name": "9"})
+
+    def test_wait_for_workspace_times_out_before_retry_launch(self):
+        saved = {"slug": "nova", "name": "Nova", "apps": [{"id": "missing"}]}
+        runtime = {
+            "signature": "",
+            "open": {"nova": {"workspace_id": 9, "workspace_name": "9", "failed_apps": ["missing"]}},
+        }
+        with patch.object(rift, "load_rift", return_value=saved), patch.object(
+            rift, "runtime_state", return_value=runtime
+        ), patch.object(rift, "hypr_dispatch"), patch.object(
+            rift, "wait_for_workspace", side_effect=RuntimeError("Timed out waiting for workspace 9")
+        ), patch.object(rift, "launch_app_result") as launch:
+            with self.assertRaisesRegex(RuntimeError, "Timed out waiting for workspace 9"):
+                rift.open_rift("nova")
+        launch.assert_not_called()
 
     def test_open_rift_does_not_hold_runtime_lock_while_launching(self):
         rift.ensure_dirs()
