@@ -613,8 +613,8 @@ Panel {
             Button {
               width: parent.width
               text: root.apps.length > 0
-                ? "Save what's on this workspace (" + root.apps.length + " app" + (root.apps.length === 1 ? "" : "s") + ") as a new Rift"
-                : "Save what's on this workspace — nothing open here yet"
+                ? "Save what's here (" + root.apps.length + " app" + (root.apps.length === 1 ? "" : "s") + ") as a new Rift"
+                : "Save what's here — nothing is open yet"
               iconText: "󰆓"
               leftAlign: true
               foreground: root.foreground
@@ -626,7 +626,7 @@ Panel {
 
             Button {
               width: parent.width
-              text: "Start on a fresh, empty workspace and build it there"
+              text: "Start on a fresh, empty workspace"
               iconText: "󰐊"
               leftAlign: true
               foreground: root.foreground
