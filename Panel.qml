@@ -34,6 +34,7 @@ Panel {
     || (stateData.workspace && stateData.workspace.id !== liveWorkspaceId)
   readonly property bool canWrite: !stale && !actionProcess.running
   onLiveWorkspaceIdChanged: if (opened) { stateStale = true; refresh() }
+  readonly property string noAppsError: "Open at least one application before saving this Rift"
 
   readonly property var barIdentity: hostWidget || root
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -115,6 +116,17 @@ Panel {
     })
   }
 
+  function syncIncludedApps(nextApps) {
+    var next = ({})
+    for (var key in includedApps) next[key] = includedApps[key]
+    for (var i = 0; i < nextApps.length; i++) {
+      var app = nextApps[i]
+      if (next[app.id] === undefined) next[app.id] = app.selected !== false
+    }
+    includedApps = next
+    if (nextApps.length > 0 && errorText === noAppsError) errorText = ""
+  }
+
   function toggleIncluded(appId) {
     var next = ({})
     for (var key in includedApps) next[key] = includedApps[key]
@@ -133,6 +145,11 @@ Panel {
     if (name === "") {
       errorText = "Give this Rift a name"
       nameField.forceActiveFocus()
+      return
+    }
+    if (apps.length === 0) {
+      errorText = noAppsError
+      refresh()
       return
     }
     runAction("save", ["save", name, "--apps", selectedAppIds().join("\x1f"),
@@ -189,6 +206,7 @@ Panel {
       try {
         var response = JSON.parse(root.stateOutput)
         if (!response.ok) throw new Error(response.error || "Could not inspect this workspace")
+        if (root.mode === "save") root.syncIncludedApps(response.data.apps || [])
         root.stateData = response.data
         root.stateStale = false
         console.debug("rift: state workspace", response.data.workspace.id, "apps:", response.data.apps.length, "rifts:", response.data.rifts.length, "current:", response.data.currentRift || "-")
@@ -198,6 +216,13 @@ Panel {
         root.errorText = String(error.message || error)
       }
     }
+  }
+
+  Timer {
+    interval: 1200
+    repeat: true
+    running: root.opened && root.mode === "save" && !stateProcess.running && !actionProcess.running
+    onTriggered: root.refresh()
   }
 
   Process {
@@ -518,7 +543,7 @@ Panel {
             Text {
               width: parent.width
               visible: root.apps.length === 0
-              text: "This workspace has no savable application windows yet. Open some apps and try again."
+              text: "This workspace has no savable application windows yet. Open an app — Rift is watching."
               wrapMode: Text.WordWrap
               color: root.dim
               font.family: root.fontFamily
