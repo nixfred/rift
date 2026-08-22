@@ -272,6 +272,26 @@ class RiftHelperTests(unittest.TestCase):
             workspace = rift.wait_for_workspace_change(2)
         self.assertEqual(workspace["id"], 3)
 
+    def test_focus_empty_workspace_accepts_already_empty_focus(self):
+        empty = {"id": 5, "name": "5", "windows": 0}
+        with patch.object(rift, "current_workspace", return_value=empty), patch.object(
+            rift, "hypr_dispatch"
+        ), patch.object(
+            rift, "wait_for_workspace_change", side_effect=RuntimeError("Timed out waiting for a fresh workspace")
+        ):
+            self.assertEqual(rift.focus_empty_workspace()["id"], 5)
+            self.assertEqual(rift.new_workspace()["workspace"]["id"], 5)
+
+    def test_focus_empty_workspace_still_fails_when_focus_has_windows(self):
+        busy = {"id": 5, "name": "5", "windows": 3}
+        with patch.object(rift, "current_workspace", return_value=busy), patch.object(
+            rift, "hypr_dispatch"
+        ), patch.object(
+            rift, "wait_for_workspace_change", side_effect=RuntimeError("Timed out waiting for a fresh workspace")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Timed out"):
+                rift.focus_empty_workspace()
+
     def test_wait_for_workspace_change_times_out(self):
         with patch.object(rift, "current_workspace", return_value={"id": 2, "name": "2"}):
             with self.assertRaisesRegex(RuntimeError, "Timed out"):

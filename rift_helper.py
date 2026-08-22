@@ -911,6 +911,26 @@ def wait_for_workspace_change(previous_id: int, timeout: float = 2.0) -> dict[st
         time.sleep(0.05)
 
 
+def focus_empty_workspace() -> dict[str, Any]:
+    """Switch to Hyprland's next empty workspace.
+
+    `workspace emptyn` is a no-op when the focused workspace is already empty
+    and there isn't another empty one to jump to. Waiting for a different id
+    then times out and New/Open fail even though we are already on a blank
+    workspace — the exact place you press “start fresh”.
+    """
+    previous = current_workspace()
+    previous_id = int(previous.get("id", 0))
+    hypr_dispatch("workspace", "emptyn")
+    try:
+        return wait_for_workspace_change(previous_id)
+    except RuntimeError:
+        focused = current_workspace()
+        if int(focused.get("id", 0) or 0) > 0 and int(focused.get("windows", 0) or 0) == 0:
+            return focused
+        raise
+
+
 def open_rift(slug: str) -> dict[str, Any]:
     rift = load_rift(slug)
     runtime = runtime_state()
@@ -940,9 +960,7 @@ def open_rift(slug: str) -> dict[str, Any]:
             }
         return {"action": "focused", "rift": rift["slug"], "workspace": association["workspace_id"]}
 
-    previous_id = int(current_workspace().get("id", 0))
-    hypr_dispatch("workspace", "emptyn")
-    workspace = wait_for_workspace_change(previous_id)
+    workspace = focus_empty_workspace()
     workspace_id = int(workspace.get("id", 0))
     apps = rift.get("apps", [])
     results = [launch_app_result(app, rift) for app in apps]
@@ -979,9 +997,7 @@ def open_rift(slug: str) -> dict[str, Any]:
 
 
 def new_workspace() -> dict[str, Any]:
-    previous_id = int(current_workspace().get("id", 0))
-    hypr_dispatch("workspace", "emptyn")
-    workspace = wait_for_workspace_change(previous_id)
+    workspace = focus_empty_workspace()
     return {"workspace": {"id": workspace.get("id", 0), "name": workspace.get("name", "")}}
 
 
