@@ -366,6 +366,29 @@ def find_desktop_entry(classes: list[str], executable: str, entries: list[dict[s
     return None
 
 
+def resolved_directory_args(argv: list[str], process_cwd: str) -> list[str]:
+    """Absolute directories from argv, with relative paths resolved against the process cwd.
+
+    `Path('.').is_dir()` is always true for the *helper's* cwd, so `code .`
+    would otherwise reopen the plugin directory instead of the project.
+    """
+    folders: list[str] = []
+    for arg in argv[1:]:
+        if not arg or arg.startswith("-"):
+            continue
+        path = Path(arg)
+        if not path.is_absolute():
+            if not process_cwd:
+                continue
+            path = Path(process_cwd) / arg
+        try:
+            if path.is_dir():
+                folders.append(str(path.resolve()))
+        except OSError:
+            continue
+    return folders
+
+
 def terminal_recipe(binary: str, cwd: str, command: list[str] | None = None) -> list[str]:
     """Launch a terminal in cwd, optionally running command inside it."""
     # --hold & friends: when the program exits you get a shell prompt instead
@@ -416,7 +439,7 @@ def app_from_client(client: dict[str, Any], entries: list[dict[str, str]]) -> di
         kind = "terminal"
     elif desktop:
         exe_name = Path(executable).name if executable else ""
-        folder_args = [arg for arg in argv[1:] if arg and not arg.startswith("-") and Path(arg).is_dir()]
+        folder_args = resolved_directory_args(argv, cwd)
         if exe_name in GUI_ARGV_APPS and folder_args:
             # Keep the project folder the editor was opened on.
             launch = [executable, *folder_args]

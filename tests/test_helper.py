@@ -388,6 +388,34 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(rift.terminal_recipe("wezterm", "/p", ["btop"]), ["wezterm", "start", "--cwd", "/p", "--", "btop"])
         self.assertEqual(rift.terminal_recipe("foot", "", []), ["foot"])
 
+    def test_resolved_directory_args_uses_process_cwd_not_helper_cwd(self):
+        project = Path(self.temp.name) / "the-project"
+        project.mkdir()
+        self.assertEqual(
+            rift.resolved_directory_args(["code", "."], str(project)),
+            [str(project.resolve())],
+        )
+        self.assertEqual(
+            rift.resolved_directory_args(["code", "--new-window", str(project)], "/unrelated"),
+            [str(project.resolve())],
+        )
+        self.assertEqual(rift.resolved_directory_args(["code", "."], ""), [])
+
+    def test_gui_editor_keeps_project_folder_from_relative_argv(self):
+        project = Path(self.temp.name) / "the-project"
+        project.mkdir()
+        client = {"class": "Code", "initialClass": "Code", "pid": 9, "title": "rift"}
+        entries = [{"id": "code", "name": "Code", "startup_class": "Code", "exec": "code"}]
+        with patch.object(
+            rift,
+            "process_info",
+            return_value=("/usr/bin/code", ["code", "."], str(project)),
+        ):
+            app = rift.app_from_client(client, entries)
+        self.assertIsNotNone(app)
+        self.assertEqual(app["launch"], ["/usr/bin/code", str(project.resolve())])
+        self.assertIn(str(project.resolve()), app["id"])
+
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(
             rift.terminal_recipe("ghostty", "/tmp/nova"),
