@@ -263,6 +263,42 @@ class RiftHelperTests(unittest.TestCase):
         ):
             self.assertEqual(rift.hypr_json("clients"), [])
 
+    def test_current_workspace_rejects_non_object_payload(self):
+        with patch.object(rift, "hypr_json", return_value=[]):
+            with self.assertRaisesRegex(RuntimeError, "unexpected JSON"):
+                rift.current_workspace()
+
+    def test_current_apps_skips_malformed_clients(self):
+        workspace = {"id": 4, "name": "4"}
+        clients = [
+            "nope",
+            {"workspace": 7},
+            {"workspace": {"id": "bad"}},
+            {"workspace": {"id": 9}, "class": "Other"},
+            {"workspace": {"id": 4}, "pid": 11, "class": "kitty", "initialClass": "kitty"},
+        ]
+        with patch.object(rift, "hypr_json", return_value=clients), patch.object(
+            rift, "desktop_entries", return_value=[]
+        ), patch.object(
+            rift,
+            "app_from_client",
+            side_effect=lambda client, _entries: {"id": "term", "name": "Kitty", "kind": "terminal"}
+            if client.get("pid") == 11
+            else None,
+        ):
+            self.assertEqual(rift.current_apps(workspace), [{"id": "term", "name": "Kitty", "kind": "terminal"}])
+
+        with patch.object(rift, "hypr_json", return_value={"ok": True}):
+            with self.assertRaisesRegex(RuntimeError, "unexpected JSON"):
+                rift.current_apps(workspace)
+
+    def test_app_from_client_tolerates_non_integer_pid(self):
+        client = {"class": "x", "initialClass": "x", "pid": "nope", "title": ""}
+        with patch.object(rift, "process_info", return_value=("", [], "")), patch.object(
+            rift, "find_desktop_entry", return_value=None
+        ):
+            self.assertIsNone(rift.app_from_client(client, []))
+
     def test_wait_for_workspace_change_handles_delayed_transition(self):
         with patch.object(
             rift,

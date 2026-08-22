@@ -480,7 +480,10 @@ def app_from_client(client: dict[str, Any], entries: list[dict[str, str]]) -> di
     if lower_classes & IGNORED_CLASSES or any("omarchy" in value for value in lower_classes):
         return None
 
-    pid = int(client.get("pid") or 0)
+    try:
+        pid = int(client.get("pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
     executable, argv, cwd = process_info(pid)
     terminal = next((TERMINALS[value] for value in lower_classes if value in TERMINALS), "")
     desktop = find_desktop_entry([app_class, initial_class], executable, entries)
@@ -533,20 +536,39 @@ def app_from_client(client: dict[str, Any], entries: list[dict[str, str]]) -> di
 
 
 def current_workspace() -> dict[str, Any]:
-    return hypr_json("activeworkspace")
+    value = hypr_json("activeworkspace")
+    if not isinstance(value, dict):
+        raise RuntimeError("hyprctl activeworkspace returned unexpected JSON")
+    return value
 
 
 def current_apps(workspace: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     workspace = workspace or current_workspace()
-    workspace_id = int(workspace.get("id", 0))
+    try:
+        workspace_id = int(workspace.get("id", 0) or 0)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("hyprctl activeworkspace returned unexpected JSON") from error
     entries = desktop_entries()
     apps: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for client in hypr_json("clients"):
-        client_workspace = client.get("workspace") or {}
-        if int(client_workspace.get("id", 0)) != workspace_id:
+    clients = hypr_json("clients")
+    if not isinstance(clients, list):
+        raise RuntimeError("hyprctl clients returned unexpected JSON")
+    for client in clients:
+        if not isinstance(client, dict):
             continue
-        app = app_from_client(client, entries)
+        client_workspace = client.get("workspace") or {}
+        if not isinstance(client_workspace, dict):
+            continue
+        try:
+            if int(client_workspace.get("id", 0) or 0) != workspace_id:
+                continue
+        except (TypeError, ValueError):
+            continue
+        try:
+            app = app_from_client(client, entries)
+        except (TypeError, ValueError):
+            continue
         if not app or app["id"] in seen:
             continue
         seen.add(app["id"])
