@@ -43,6 +43,17 @@ class RiftHelperTests(unittest.TestCase):
         runtime = rift.read_json(rift.RUNTIME_FILE, {})
         self.assertEqual(runtime["open"]["project-nova"]["workspace_id"], 4)
 
+    def test_save_aborts_if_focus_changes_during_snapshot(self):
+        with patch.object(rift, "current_apps", return_value=[]), patch.object(
+            rift,
+            "current_workspace",
+            side_effect=[{"id": 2, "name": "2"}, {"id": 3, "name": "3"}],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Workspace changed"):
+                rift.save_rift("Unstable")
+
+        self.assertFalse(rift.rift_path("unstable").exists())
+
     def test_atomic_json_supports_concurrent_writers(self):
         destination = rift.STATE_ROOT / "concurrent.json"
         barrier = threading.Barrier(12)
@@ -153,6 +164,44 @@ class RiftHelperTests(unittest.TestCase):
 
         self.assertEqual(state, expected)
 
+    def test_runtime_state_recovers_from_wrong_json_shapes(self):
+        signature = rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+        malformed_values = [[], "broken", {"signature": signature, "open": []}]
+        for malformed in malformed_values:
+            with self.subTest(value=malformed):
+                rift.atomic_json(rift.RUNTIME_FILE, malformed)
+                with patch.object(rift, "hypr_json", return_value=[]):
+                    self.assertEqual(rift.runtime_state(), {"signature": signature, "open": {}})
+
+    def test_load_rifts_skips_invalid_files_and_app_recipes(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.RIFTS_ROOT / "wrong-name.json", {
+            "schemaVersion": 1, "slug": "different", "name": "Different", "apps": []
+        })
+        rift.atomic_json(rift.RIFTS_ROOT / "nova.json", {
+            "schemaVersion": 1,
+            "slug": "nova",
+            "name": "Nova",
+            "apps": [
+                {"id": "bad", "launch": "missing-app"},
+                {"id": "good", "launch": ["working-app", "--flag"]},
+            ],
+        })
+
+        loaded = rift.load_rifts()
+
+        self.assertEqual([item["slug"] for item in loaded], ["nova"])
+        self.assertEqual([item["id"] for item in loaded[0]["apps"]], ["good"])
+        self.assertEqual(loaded[0]["validationErrors"], ["Skipped invalid app recipe at index 0"])
+
+    def test_load_rift_rejects_unsupported_schema(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.RIFTS_ROOT / "nova.json", {
+            "schemaVersion": 99, "slug": "nova", "name": "Nova", "apps": []
+        })
+        with self.assertRaisesRegex(ValueError, "not found or invalid"):
+            rift.load_rift("nova")
+
     def test_lua_dispatch_formats_workspace_focus_for_hyprland_056(self):
         self.assertEqual(rift.lua_dispatch("workspace", "7"), "hl.dsp.focus({ workspace = 7 })")
         self.assertEqual(rift.lua_dispatch("workspace", "emptyn"), 'hl.dsp.focus({ workspace = "emptyn" })')
@@ -171,9 +220,23 @@ class RiftHelperTests(unittest.TestCase):
             rift.hypr_dispatch("workspace", "3")
         self.assertEqual(calls, [["hl.dsp.focus({ workspace = 3 })"], ["workspace", "3"]])
 
+    def test_wait_for_workspace_change_handles_delayed_transition(self):
+        with patch.object(
+            rift,
+            "current_workspace",
+            side_effect=[{"id": 2, "name": "2"}, {"id": 2, "name": "2"}, {"id": 3, "name": "3"}],
+        ), patch.object(rift.time, "sleep"):
+            workspace = rift.wait_for_workspace_change(2)
+        self.assertEqual(workspace["id"], 3)
+
+    def test_wait_for_workspace_change_times_out(self):
+        with patch.object(rift, "current_workspace", return_value={"id": 2, "name": "2"}):
+            with self.assertRaisesRegex(RuntimeError, "Timed out"):
+                rift.wait_for_workspace_change(2, timeout=0)
+
     def test_update_keeps_previous_recipe_and_revert_swaps_it_back(self):
-        first = [{"id": "editor", "name": "Editor", "selected": True}]
-        second = [{"id": "browser", "name": "Browser", "selected": True}]
+        first = [{"id": "editor", "name": "Editor", "selected": True, "launch": ["editor"]}]
+        second = [{"id": "browser", "name": "Browser", "selected": True, "launch": ["browser"]}]
         with patch.object(rift, "current_workspace", return_value={"id": 3, "name": "3"}), patch.object(
             rift, "hypr_json", return_value=[{"id": 3}]
         ):
@@ -202,6 +265,31 @@ class RiftHelperTests(unittest.TestCase):
             ["ghostty", "--working-directory=/tmp/nova"],
         )
 
+    def test_desktop_exec_binary_parses_quoted_and_escaped_paths(self):
+        self.assertEqual(
+            rift.desktop_exec_binary('"/opt/My Editor/bin/editor" --open %F'),
+            "/opt/My Editor/bin/editor",
+        )
+        self.assertEqual(
+            rift.desktop_exec_binary(r"/opt/My\ Editor/bin/editor %U"),
+            "/opt/My Editor/bin/editor",
+        )
+
+    def test_desktop_exec_binary_unwraps_environment_command(self):
+        self.assertEqual(
+            rift.desktop_exec_binary("env --ignore-environment THEME=dark /usr/bin/editor %F"),
+            "/usr/bin/editor",
+        )
+        self.assertEqual(
+            rift.desktop_exec_binary("/usr/bin/env --unset DISPLAY -- /usr/bin/editor"),
+            "/usr/bin/editor",
+        )
+
+    def test_desktop_exec_binary_rejects_malformed_or_ambiguous_values(self):
+        self.assertEqual(rift.desktop_exec_binary('"unterminated'), "")
+        self.assertEqual(rift.desktop_exec_binary("env --split-string editor --flag"), "")
+        self.assertEqual(rift.desktop_exec_binary("%F"), "")
+
     def test_unlaunchable_app_does_not_abort_rift(self):
         broken = {"launch": ["missing-app"], "cwd": "", "policy": "launch"}
         working = {"launch": ["working-app"], "cwd": "", "policy": "launch"}
@@ -229,6 +317,8 @@ class RiftHelperTests(unittest.TestCase):
         ), patch.object(
             rift, "current_workspace", return_value={"id": 9, "name": "9"}
         ), patch.object(
+            rift, "wait_for_workspace_change", return_value={"id": 9, "name": "9"}
+        ), patch.object(
             rift,
             "launch_app_result",
             return_value={"app": "missing", "status": "failed", "error": "not found"},
@@ -254,6 +344,8 @@ class RiftHelperTests(unittest.TestCase):
             rift.time, "sleep"
         ), patch.object(
             rift, "current_workspace", return_value={"id": 9, "name": "9"}
+        ), patch.object(
+            rift, "wait_for_workspace_change", return_value={"id": 9, "name": "9"}
         ), patch.object(rift, "launch_app_result", side_effect=outcomes):
             result = rift.open_rift("nova")
 

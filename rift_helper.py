@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -178,6 +179,42 @@ def process_info(pid: int) -> tuple[str, list[str], str]:
     return executable, argv, cwd
 
 
+def desktop_exec_binary(exec_line: str) -> str:
+    """Return the executable token from a Desktop Entry Exec value."""
+    try:
+        tokens = shlex.split(exec_line, posix=True)
+    except ValueError:
+        return ""
+    if not tokens:
+        return ""
+    index = 0
+    if Path(tokens[0]).name == "env":
+        index = 1
+        while index < len(tokens):
+            token = tokens[index]
+            if token == "--":
+                index += 1
+                break
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", token):
+                index += 1
+                continue
+            if token in {"-u", "--unset"}:
+                index += 2
+                continue
+            if token in {"-i", "--ignore-environment", "-0", "--null", "--debug"}:
+                index += 1
+                continue
+            if token.startswith("--unset=") or token.startswith("--chdir="):
+                index += 1
+                continue
+            if token.startswith("-"):
+                return ""
+            break
+    if index >= len(tokens) or tokens[index].startswith("%"):
+        return ""
+    return tokens[index]
+
+
 def desktop_entries() -> list[dict[str, str]]:
     roots = [Path.home() / ".local/share/applications", Path("/usr/share/applications")]
     entries: list[dict[str, str]] = []
@@ -194,7 +231,7 @@ def desktop_entries() -> list[dict[str, str]]:
             if section.get("Type", "Application") != "Application" or section.getboolean("NoDisplay", fallback=False):
                 continue
             exec_line = section.get("Exec", "").strip()
-            exec_token = exec_line.split()[0] if exec_line else ""
+            exec_token = desktop_exec_binary(exec_line)
             entries.append(
                 {
                     "id": path.name.removesuffix(".desktop"),
@@ -284,8 +321,8 @@ def current_workspace() -> dict[str, Any]:
     return hypr_json("activeworkspace")
 
 
-def current_apps() -> list[dict[str, Any]]:
-    workspace = current_workspace()
+def current_apps(workspace: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    workspace = workspace or current_workspace()
     workspace_id = int(workspace.get("id", 0))
     entries = desktop_entries()
     apps: list[dict[str, Any]] = []
@@ -303,12 +340,51 @@ def current_apps() -> list[dict[str, Any]]:
     return apps
 
 
+def valid_app_recipe(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    launch = value.get("launch")
+    return bool(
+        isinstance(launch, list)
+        and launch
+        and all(isinstance(argument, str) and "\0" not in argument for argument in launch)
+    )
+
+
+def validated_rift(value: Any, expected_slug: str | None = None) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or value.get("schemaVersion") != 1:
+        return None
+    slug = value.get("slug")
+    name = value.get("name")
+    apps = value.get("apps")
+    if not isinstance(slug, str) or not slug:
+        return None
+    try:
+        if slugify(slug) != slug:
+            return None
+    except ValueError:
+        return None
+    if expected_slug is not None and slug != expected_slug:
+        return None
+    if not isinstance(name, str) or not name.strip() or not isinstance(apps, list):
+        return None
+    result = dict(value)
+    result["apps"] = [app for app in apps if valid_app_recipe(app)]
+    result["validationErrors"] = [
+        f"Skipped invalid app recipe at index {index}"
+        for index, app in enumerate(apps)
+        if not valid_app_recipe(app)
+    ]
+    result["startup"] = value.get("startup") is True
+    return result
+
+
 def load_rifts() -> list[dict[str, Any]]:
     ensure_dirs()
     result = []
     for path in sorted(RIFTS_ROOT.glob("*.json")):
-        value = read_json(path, None)
-        if isinstance(value, dict) and value.get("slug"):
+        value = validated_rift(read_json(path, None), path.stem)
+        if value is not None:
             result.append(value)
     result.sort(key=lambda item: str(item.get("name", "")).casefold())
     return result
@@ -319,17 +395,39 @@ def rift_path(slug: str) -> Path:
 
 
 def load_rift(slug: str) -> dict[str, Any]:
-    value = read_json(rift_path(slug), None)
-    if not isinstance(value, dict):
-        raise ValueError(f"Rift not found: {slug}")
+    expected_slug = slugify(slug)
+    value = validated_rift(read_json(rift_path(expected_slug), None), expected_slug)
+    if value is None:
+        raise ValueError(f"Rift not found or invalid: {slug}")
     return value
+
+
+def normalized_runtime_state(value: Any, signature: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("signature") != signature:
+        return {"signature": signature, "open": {}}
+    associations = value.get("open")
+    if not isinstance(associations, dict):
+        associations = {}
+    valid = {}
+    for slug, association in associations.items():
+        if not isinstance(slug, str) or not isinstance(association, dict):
+            continue
+        try:
+            workspace_id = int(association.get("workspace_id", 0))
+        except (TypeError, ValueError):
+            continue
+        if workspace_id <= 0:
+            continue
+        valid[slug] = {
+            "workspace_id": workspace_id,
+            "workspace_name": str(association.get("workspace_name", "")),
+        }
+    return {"signature": signature, "open": valid}
 
 
 def runtime_state() -> dict[str, Any]:
     signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
-    state = read_json(RUNTIME_FILE, {"signature": signature, "open": {}})
-    if state.get("signature") != signature:
-        state = {"signature": signature, "open": {}}
+    state = normalized_runtime_state(read_json(RUNTIME_FILE, None), signature)
     try:
         live_ids = {int(item.get("id", 0)) for item in hypr_json("workspaces")}
     except Exception:
@@ -358,7 +456,7 @@ def runtime_transaction() -> Iterator[dict[str, Any]]:
 
 def state_payload() -> dict[str, Any]:
     workspace = current_workspace()
-    apps = current_apps()
+    apps = current_apps(workspace)
     runtime = runtime_state()
     current_slug = ""
     for slug, association in runtime.get("open", {}).items():
@@ -380,12 +478,17 @@ def state_payload() -> dict[str, Any]:
 
 def save_rift(name: str, include_ids: list[str] | None = None) -> dict[str, Any]:
     slug = slugify(name)
-    apps = current_apps()
+    workspace = current_workspace()
+    workspace_id = int(workspace.get("id", 0))
+    apps = current_apps(workspace)
     if include_ids is None:
         apps = [app for app in apps if app.get("selected", True)]
     else:
         wanted = set(include_ids)
         apps = [app for app in apps if app["id"] in wanted]
+    focused = current_workspace()
+    if int(focused.get("id", 0)) != workspace_id:
+        raise RuntimeError("Workspace changed while saving; try again")
     existing = read_json(rift_path(slug), {})
     value = {
         "schemaVersion": 1,
@@ -401,8 +504,6 @@ def save_rift(name: str, include_ids: list[str] | None = None) -> dict[str, Any]
     elif existing.get("previous"):
         value["previous"] = existing["previous"]
     atomic_json(rift_path(slug), value)
-    workspace = current_workspace()
-    workspace_id = int(workspace.get("id", 0))
     with runtime_transaction() as runtime:
         runtime["open"] = {
             open_slug: association
@@ -460,6 +561,18 @@ def launch_app(app: dict[str, Any], rift: dict[str, Any]) -> bool:
     return launch_app_result(app, rift)["status"] == "launched"
 
 
+def wait_for_workspace_change(previous_id: int, timeout: float = 2.0) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while True:
+        workspace = current_workspace()
+        workspace_id = int(workspace.get("id", 0))
+        if workspace_id > 0 and workspace_id != previous_id:
+            return workspace
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Timed out waiting for a fresh workspace")
+        time.sleep(0.05)
+
+
 def open_rift(slug: str) -> dict[str, Any]:
     rift = load_rift(slug)
     with runtime_transaction() as runtime:
@@ -486,9 +599,9 @@ def open_rift(slug: str) -> dict[str, Any]:
                 }
             return {"action": "focused", "rift": rift["slug"], "workspace": association["workspace_id"]}
 
+        previous_id = int(current_workspace().get("id", 0))
         hypr_dispatch("workspace", "emptyn")
-        time.sleep(0.12)
-        workspace = current_workspace()
+        workspace = wait_for_workspace_change(previous_id)
         workspace_id = int(workspace.get("id", 0))
         apps = rift.get("apps", [])
         results = [launch_app_result(app, rift) for app in apps]
@@ -519,13 +632,14 @@ def open_rift(slug: str) -> dict[str, Any]:
         "launched": launched,
         "failed": failed,
         "results": results,
+        "validationErrors": rift.get("validationErrors", []),
     }
 
 
 def new_workspace() -> dict[str, Any]:
+    previous_id = int(current_workspace().get("id", 0))
     hypr_dispatch("workspace", "emptyn")
-    time.sleep(0.12)
-    workspace = current_workspace()
+    workspace = wait_for_workspace_change(previous_id)
     return {"workspace": {"id": workspace.get("id", 0), "name": workspace.get("name", "")}}
 
 

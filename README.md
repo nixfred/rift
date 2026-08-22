@@ -131,6 +131,11 @@ A Rift looks like this:
 
 Hand-edit it. Add a `launch` the detector couldn't see. It's just JSON.
 
+> [!WARNING]
+> Rift definitions are trusted executable configuration. Every `launch` array
+> can start a local command, including at login when `startup` is enabled.
+> Review definitions from other people before placing them in your Rifts folder.
+
 ### Scripting & IPC
 
 Everything the panel does, you can do from a shell:
