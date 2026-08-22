@@ -76,6 +76,25 @@ class RiftHelperTests(unittest.TestCase):
             ["ghostty", "--working-directory=/tmp/nova"],
         )
 
+    def test_failed_startup_can_be_retried(self):
+        rift.ensure_dirs()
+        rift.atomic_json(
+            rift.rift_path("nova"),
+            {"schemaVersion": 1, "slug": "nova", "name": "Nova", "startup": True, "apps": []},
+        )
+        signature = rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+        marker = rift.STATE_ROOT / f"startup-{rift.re.sub(r'[^a-zA-Z0-9_.-]', '_', signature)}"
+
+        with patch.object(rift, "open_rift", side_effect=RuntimeError("launch failed")):
+            with self.assertRaisesRegex(RuntimeError, "launch failed"):
+                rift.startup_open()
+
+        self.assertFalse(marker.exists())
+        with patch.object(rift, "open_rift", return_value={"action": "opened"}) as open_rift:
+            result = rift.startup_open()
+        self.assertEqual(result["action"], "startup")
+        open_rift.assert_called_once_with("nova")
+
 
 if __name__ == "__main__":
     unittest.main()

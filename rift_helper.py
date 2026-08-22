@@ -417,22 +417,22 @@ def delete_rift(slug: str) -> None:
 
 def startup_open() -> dict[str, Any]:
     ensure_dirs()
-    lock = STARTUP_LOCK.open("w")
-    try:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return {"action": "already-running"}
-    signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
-    marker = STATE_ROOT / f"startup-{re.sub(r'[^a-zA-Z0-9_.-]', '_', signature)}"
-    if marker.exists():
-        return {"action": "already-opened"}
-    marker.touch()
-    opened = []
-    for rift in load_rifts():
-        if rift.get("startup"):
-            opened.append(open_rift(rift["slug"]))
-            time.sleep(0.25)
-    return {"action": "startup", "opened": opened}
+    with STARTUP_LOCK.open("w") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"action": "already-running"}
+        signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+        marker = STATE_ROOT / f"startup-{re.sub(r'[^a-zA-Z0-9_.-]', '_', signature)}"
+        if marker.exists():
+            return {"action": "already-opened"}
+        opened = []
+        for rift in load_rifts():
+            if rift.get("startup"):
+                opened.append(open_rift(rift["slug"]))
+                time.sleep(0.25)
+        marker.touch()
+        return {"action": "startup", "opened": opened}
 
 
 def emit(value: Any) -> None:
