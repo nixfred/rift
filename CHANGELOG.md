@@ -2,6 +2,11 @@
 
 All notable changes to Rift. The version shown in the panel header (`RIFTS vX.Y.Z`) and bar tooltip is the one in `manifest.json`; tests keep them in lockstep.
 
+## v0.3.4 — 2026-08-21 · Rename in the entry (#16)
+
+- **Rename** button / `E` in a Rift's entry: inline field, Enter saves, Esc cancels; slug, file and workspace association follow (helper `rename`)
+- Delete + rename now both live in the entry — #16's panel lifecycle is complete except duplicate (deliberately skipped)
+
 ## v0.3.3 — 2026-08-21 · Launch results in the entry (#20)
 
 - Opening a Rift that partially fails no longer just fires a notification: the entry shows **each app** with ✓ launched / ⟳ already running / ✗ failed + the reason

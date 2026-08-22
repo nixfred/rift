@@ -11,7 +11,7 @@ Panel {
   ipcTarget: "nixfred.rift"
   manageIpc: false
 
-  readonly property string riftVersion: "0.3.3"  // keep in lockstep with manifest.json (tests enforce)
+  readonly property string riftVersion: "0.3.4"  // keep in lockstep with manifest.json (tests enforce)
   property var anchorItem: null
   property var hostWidget: null
   property string helperPath: ""
@@ -19,6 +19,7 @@ Panel {
   property string mode: "browse"          // browse | new | detail | save
   property string detailSlug: ""
   property bool confirmDelete: false
+  property bool renaming: false
   // Last open/retry outcome, shown inside the entry so partial failures are
   // visible and retryable instead of vanishing into a notification.
   property var lastOpen: null
@@ -203,8 +204,33 @@ Panel {
     if (detailSlug !== slug) lastOpen = null
     detailSlug = slug
     confirmDelete = false
+    renaming = false
     errorText = ""
     mode = "detail"
+  }
+
+  function beginRename() {
+    if (!detailRift || actionProcess.running) return
+    confirmDelete = false
+    renaming = true
+    Qt.callLater(function() {
+      renameField.text = detailRift ? detailRift.name : ""
+      renameField.selectAll()
+      renameField.forceActiveFocus()
+    })
+  }
+
+  function cancelRename() {
+    renaming = false
+    keyCatcher.forceActiveFocus()
+  }
+
+  function commitRename() {
+    if (!detailRift) return
+    var name = String(renameField.text || "").trim()
+    if (name === "") { errorText = "Give this Rift a name"; return }
+    if (name === detailRift.name) { cancelRename(); return }
+    runAction("rename", ["rename", detailRift.slug, name])
   }
 
   function resultIcon(status) {
@@ -222,6 +248,7 @@ Panel {
   function backToBrowse() {
     mode = "browse"
     confirmDelete = false
+    renaming = false
     errorText = ""
   }
 
@@ -346,6 +373,12 @@ Panel {
         } else if (root.pendingAction === "new") {
           root.notify("Fresh workspace " + response.data.workspace.id, "Open what belongs here, then click 󰦛 and save it as a Rift.")
           root.close()
+        } else if (root.pendingAction === "rename") {
+          root.renaming = false
+          root.detailSlug = response.data.slug
+          root.statusText = "Renamed to " + response.data.name
+          keyCatcher.forceActiveFocus()
+          root.refresh()
         } else if (root.pendingAction === "delete") {
           root.mode = "browse"
           root.confirmDelete = false
@@ -390,7 +423,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: root.mode === "save"
+      blocked: root.mode === "save" || root.renaming
       onMoveRequested: function(dx, dy) { if (dy !== 0) root.moveSelection(dy) }
       onActivateRequested: root.activateSelection()
       onCloseRequested: { if (root.mode === "detail" || root.mode === "new") root.backToBrowse(); else root.close() }
@@ -411,6 +444,7 @@ Panel {
           else if (key === "r") root.revertRift(root.detailRift)
           else if (key === "l") root.toggleStartup(root.detailRift)
           else if (key === "d") root.deleteRift(root.detailRift)
+          else if (key === "e") root.beginRename()
           else if (key === "b") root.backToBrowse()
         }
       }
@@ -903,6 +937,50 @@ Panel {
               enabled: !actionProcess.running
               tooltipText: "L"
               onClicked: root.toggleStartup(root.detailRift)
+            }
+
+            Button {
+              visible: !root.renaming
+              width: parent.width
+              text: "Rename"
+              iconText: "󰏫"
+              leftAlign: true
+              foreground: root.foreground
+              focusable: true
+              enabled: !actionProcess.running
+              tooltipText: "E"
+              onClicked: root.beginRename()
+            }
+
+            Row {
+              visible: root.renaming
+              width: parent.width
+              spacing: Style.space(8)
+              TextField {
+                id: renameField
+                width: parent.width - renameSave.width - renameCancel.width - parent.spacing * 2
+                placeholderText: "New name"
+                foreground: root.foreground
+                onAccepted: root.commitRename()
+                Keys.onEscapePressed: root.cancelRename()
+              }
+              Button {
+                id: renameSave
+                text: actionProcess.running ? "Renaming…" : "Save"
+                iconText: "󰄬"
+                foreground: root.foreground
+                active: true
+                focusable: true
+                enabled: !actionProcess.running
+                onClicked: root.commitRename()
+              }
+              Button {
+                id: renameCancel
+                text: "Cancel"
+                foreground: root.foreground
+                focusable: true
+                onClicked: root.cancelRename()
+              }
             }
 
             Row {
