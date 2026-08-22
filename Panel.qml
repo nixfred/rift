@@ -173,7 +173,10 @@ Panel {
         var response = JSON.parse(root.actionOutput)
         if (!response.ok) throw new Error(response.error || "Rift action failed")
         if (root.pendingAction === "open") {
-          root.notify("Rift opened", "Your applications are launching on a fresh workspace.")
+          if (response.data.action === "focused")
+            root.notify("Rift focused", "Switched to workspace " + response.data.workspace + ".")
+          else
+            root.notify("Rift opened", response.data.launched + " application" + (response.data.launched === 1 ? " is" : "s are") + " launching on workspace " + response.data.workspace + ".")
           root.close()
         } else if (root.pendingAction === "new") {
           root.mode = "new-loading"
