@@ -11,7 +11,7 @@
 [![Omarchy plugin](https://img.shields.io/badge/Omarchy-bar%20plugin-9d7cd8?style=for-the-badge&logo=archlinux&logoColor=white)](https://omarchy.org)
 [![Hyprland](https://img.shields.io/badge/Hyprland-native-58e1ff?style=for-the-badge)](https://hypr.land)
 [![Zero deps](https://img.shields.io/badge/deps-python3%20%2B%20hyprctl-success?style=for-the-badge)](#requirements)
-[![Version](https://img.shields.io/badge/version-0.3.3-8b5cf6?style=for-the-badge)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.4-8b5cf6?style=for-the-badge)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 
 ```bash
@@ -40,7 +40,7 @@ A *Rift* is a named set of applications. Open it and Rift grabs the next empty w
 |---|---|
 | Click `󰦛` → **Save this workspace as a Rift** | Scans the focused workspace, detects every app, resolves it to a launchable recipe, stores it as `~/.config/rift/rifts/<name>.json` |
 | Click `＋` (always top-right) | **New Rift** chooser: *save what's on this workspace*, or *start on a fresh, empty workspace* and build it there |
-| Click a Rift | Opens its **entry**: every app it holds, where it's open, and the actions — **Open / Go to workspace**, **Update** (only when you're standing on it), **Revert**, **Open at login**, **Delete** (asks twice) |
+| Click a Rift | Opens its **entry**: every app it holds, where it's open, and the actions — **Open / Go to workspace**, **Update** (only when you're standing on it), **Revert**, **Open at login**, **Rename**, **Delete** (asks twice) |
 | First run | A short **help** walkthrough sits at the top until you save your first Rift. `󰋖` brings it back any time |
 
 ## What a Rift actually saves
@@ -84,7 +84,7 @@ The panel is fully keyboard-driven, in the same `KeyboardPanel` style as Omarchy
 | `N` | New Rift chooser (`S` save what's here · `F` fresh workspace) |
 | `S` | Save this workspace as a Rift |
 | `H` | Toggle help |
-| in an entry: `O`/`Enter` open · `U` update · `R` revert · `L` login toggle · `D` `D` delete · `Esc` back |
+| in an entry: `O`/`Enter` open · `U` update · `R` revert · `L` login toggle · `E` rename · `D` `D` delete · `Esc` back |
 | `Esc` | Back / close |
 | `Tab` / `Shift+Tab` | Switch to neighbouring bar popouts |
 
@@ -191,7 +191,7 @@ bind = SUPER, R, exec, omarchy-shell nixfred.rift toggle
 
 ## Roadmap
 
-- [x] Delete from the panel (rename via CLI for now)
+- [x] Delete and rename from the panel
 - [ ] Per-app launch delay & ordering
 - [ ] Optional `exec` override per app in the save panel
 
