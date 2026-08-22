@@ -40,7 +40,8 @@ A *Rift* is a named set of applications. Open it and Rift grabs the next empty w
 | Click `󰦛` in the bar → **Save** | Scans the focused workspace, detects every app, resolves it to a launchable recipe, stores it as `~/.config/rift/rifts/<name>.json` |
 | Click a saved Rift | Already open? **Jumps to its workspace.** Not open? **Spawns a fresh workspace and launches everything.** |
 | Toggle **Open at login** | That Rift comes up with your session. Idempotent — locked, marked per Hyprland instance, never double-launches |
-| Click `＋` | Moves you to a clean workspace so you can build the next Rift from scratch |
+| Standing on a Rift → header shows `󰑐` | **One click re-records** this workspace into that Rift. Changed something? `Revert` puts the previous recipe back (and revert is itself revertible) |
+| Click `＋` on an unsaved workspace | Saves *this* workspace as a new Rift — Rift never drags you off to a different workspace |
 
 ## Why it's smarter than "remember my windows"
 
@@ -48,7 +49,7 @@ A *Rift* is a named set of applications. Open it and Rift grabs the next empty w
 - **Real launch recipes, not guesses.** Apps are resolved to their `.desktop` entry (via `StartupWMClass`, id, or binary match) so they launch the way Omarchy launches them. Falls back to the executable only when there's no entry.
 - **Global apps are global.** Spotify, Signal, Discord, Slack, 1Password, Bitwarden are tagged `ensure` — Rift will never launch a second copy if one is already running anywhere. They're also deselected by default at save time so your "Work" Rift doesn't own your music.
 - **Pick exactly what's in the Rift.** The save panel lists every detected app with a toggle. Don't want the browser in there? Untick it.
-- **Knows when you drifted.** If the apps on a Rift's workspace no longer match what was saved, the panel shows it — and `U` updates the definition in place.
+- **Knows when you drifted.** If the apps on a Rift's workspace no longer match what was saved, the panel lights up the `󰑐` button — one click (or `U`) re-records it. Every update keeps the previous recipe, so **Revert** is always one click away.
 - **Survives compositor restarts correctly.** Runtime workspace associations are keyed to `HYPRLAND_INSTANCE_SIGNATURE` and pruned against live workspaces, so stale "this Rift is on workspace 7" claims die with the session that made them.
 - **Shell noise filtered out.** Omarchy shell, Quickshell, Walker/wofi/rofi/fuzzel never end up inside a Rift.
 - **Launched apps know their Rift.** Every process gets `RIFT_NAME` and `RIFT_SLUG` in its environment — hook your own tooling on it.
@@ -61,9 +62,10 @@ The panel is fully keyboard-driven, in the same `KeyboardPanel` style as Omarchy
 |---|---|
 | `↑` `↓` | Move through saved Rifts |
 | `Enter` | Open / focus the selected Rift |
-| `S` | Save the current workspace as a Rift |
-| `U` | Update the current Rift with what's on the workspace now |
-| `N` | Fresh empty workspace |
+| `S` | Save the current workspace as a Rift (opens the app picker) |
+| `U` | One-click update the current Rift with what's on the workspace now |
+| `R` | Revert the current Rift to its previous recipe |
+| `N` | New Rift from this workspace |
 | `Esc` | Close |
 | `Tab` / `Shift+Tab` | Switch to neighbouring bar popouts |
 
@@ -129,6 +131,11 @@ A Rift looks like this:
 
 Hand-edit it. Add a `launch` the detector couldn't see. It's just JSON.
 
+> [!WARNING]
+> Rift definitions are trusted executable configuration. Every `launch` array
+> can start a local command, including at login when `startup` is enabled.
+> Review definitions from other people before placing them in your Rifts folder.
+
 ### Scripting & IPC
 
 Everything the panel does, you can do from a shell:
@@ -139,6 +146,7 @@ python3 $H state                       # what's on this workspace + all rifts
 python3 $H save "API work"             # save focused workspace
 python3 $H open api-work               # focus or launch
 python3 $H startup api-work on|off     # toggle autostart
+python3 $H revert api-work             # swap back to the previous recipe
 python3 $H delete api-work             # remove a rift
 python3 $H new-workspace               # jump to next empty workspace
 

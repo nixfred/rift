@@ -1,6 +1,7 @@
 import importlib.util
 import tempfile
 import threading
+import time
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -42,6 +43,17 @@ class RiftHelperTests(unittest.TestCase):
         runtime = rift.read_json(rift.RUNTIME_FILE, {})
         self.assertEqual(runtime["open"]["project-nova"]["workspace_id"], 4)
 
+    def test_save_aborts_if_focus_changes_during_snapshot(self):
+        with patch.object(rift, "current_apps", return_value=[]), patch.object(
+            rift,
+            "current_workspace",
+            side_effect=[{"id": 2, "name": "2"}, {"id": 3, "name": "3"}],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Workspace changed"):
+                rift.save_rift("Unstable")
+
+        self.assertFalse(rift.rift_path("unstable").exists())
+
     def test_atomic_json_supports_concurrent_writers(self):
         destination = rift.STATE_ROOT / "concurrent.json"
         barrier = threading.Barrier(12)
@@ -63,6 +75,33 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertIn(rift.read_json(destination, {})["writer"], range(12))
         self.assertEqual(list(destination.parent.glob("*.tmp")), [])
+
+    def test_runtime_transaction_preserves_concurrent_mutations(self):
+        barrier = threading.Barrier(8)
+        failures = []
+
+        def associate(workspace_id):
+            try:
+                barrier.wait()
+                with rift.runtime_transaction() as state:
+                    state.setdefault("open", {})[f"rift-{workspace_id}"] = {
+                        "workspace_id": workspace_id,
+                        "workspace_name": str(workspace_id),
+                    }
+                    time.sleep(0.01)
+            except Exception as error:
+                failures.append(error)
+
+        with patch.object(rift, "hypr_json", return_value=[{"id": item} for item in range(1, 9)]):
+            threads = [threading.Thread(target=associate, args=(item,)) for item in range(1, 9)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(failures, [])
+        state = rift.read_json(rift.RUNTIME_FILE, {})
+        self.assertEqual(set(state["open"]), {f"rift-{item}" for item in range(1, 9)})
 
     def test_explicit_empty_selection_saves_no_apps(self):
         apps = [{"id": "editor", "name": "Editor", "selected": True}]
@@ -125,6 +164,44 @@ class RiftHelperTests(unittest.TestCase):
 
         self.assertEqual(state, expected)
 
+    def test_runtime_state_recovers_from_wrong_json_shapes(self):
+        signature = rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+        malformed_values = [[], "broken", {"signature": signature, "open": []}]
+        for malformed in malformed_values:
+            with self.subTest(value=malformed):
+                rift.atomic_json(rift.RUNTIME_FILE, malformed)
+                with patch.object(rift, "hypr_json", return_value=[]):
+                    self.assertEqual(rift.runtime_state(), {"signature": signature, "open": {}})
+
+    def test_load_rifts_skips_invalid_files_and_app_recipes(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.RIFTS_ROOT / "wrong-name.json", {
+            "schemaVersion": 1, "slug": "different", "name": "Different", "apps": []
+        })
+        rift.atomic_json(rift.RIFTS_ROOT / "nova.json", {
+            "schemaVersion": 1,
+            "slug": "nova",
+            "name": "Nova",
+            "apps": [
+                {"id": "bad", "launch": "missing-app"},
+                {"id": "good", "launch": ["working-app", "--flag"]},
+            ],
+        })
+
+        loaded = rift.load_rifts()
+
+        self.assertEqual([item["slug"] for item in loaded], ["nova"])
+        self.assertEqual([item["id"] for item in loaded[0]["apps"]], ["good"])
+        self.assertEqual(loaded[0]["validationErrors"], ["Skipped invalid app recipe at index 0"])
+
+    def test_load_rift_rejects_unsupported_schema(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.RIFTS_ROOT / "nova.json", {
+            "schemaVersion": 99, "slug": "nova", "name": "Nova", "apps": []
+        })
+        with self.assertRaisesRegex(ValueError, "not found or invalid"):
+            rift.load_rift("nova")
+
     def test_lua_dispatch_formats_workspace_focus_for_hyprland_056(self):
         self.assertEqual(rift.lua_dispatch("workspace", "7"), "hl.dsp.focus({ workspace = 7 })")
         self.assertEqual(rift.lua_dispatch("workspace", "emptyn"), 'hl.dsp.focus({ workspace = "emptyn" })')
@@ -142,6 +219,45 @@ class RiftHelperTests(unittest.TestCase):
         with patch.object(rift, "_hyprctl_dispatch", side_effect=fake):
             rift.hypr_dispatch("workspace", "3")
         self.assertEqual(calls, [["hl.dsp.focus({ workspace = 3 })"], ["workspace", "3"]])
+
+    def test_wait_for_workspace_change_handles_delayed_transition(self):
+        with patch.object(
+            rift,
+            "current_workspace",
+            side_effect=[{"id": 2, "name": "2"}, {"id": 2, "name": "2"}, {"id": 3, "name": "3"}],
+        ), patch.object(rift.time, "sleep"):
+            workspace = rift.wait_for_workspace_change(2)
+        self.assertEqual(workspace["id"], 3)
+
+    def test_wait_for_workspace_change_times_out(self):
+        with patch.object(rift, "current_workspace", return_value={"id": 2, "name": "2"}):
+            with self.assertRaisesRegex(RuntimeError, "Timed out"):
+                rift.wait_for_workspace_change(2, timeout=0)
+
+    def test_update_keeps_previous_recipe_and_revert_swaps_it_back(self):
+        first = [{"id": "editor", "name": "Editor", "selected": True, "launch": ["editor"]}]
+        second = [{"id": "browser", "name": "Browser", "selected": True, "launch": ["browser"]}]
+        with patch.object(rift, "current_workspace", return_value={"id": 3, "name": "3"}), patch.object(
+            rift, "hypr_json", return_value=[{"id": 3}]
+        ):
+            with patch.object(rift, "current_apps", return_value=first):
+                rift.save_rift("Nova")
+            with patch.object(rift, "current_apps", return_value=second):
+                updated = rift.save_rift("Nova")
+
+        self.assertEqual([a["id"] for a in updated["apps"]], ["browser"])
+        self.assertEqual([a["id"] for a in updated["previous"]["apps"]], ["editor"])
+
+        reverted = rift.revert_rift("nova")
+        self.assertEqual([a["id"] for a in reverted["apps"]], ["editor"])
+        self.assertEqual([a["id"] for a in reverted["previous"]["apps"]], ["browser"])
+        self.assertEqual([a["id"] for a in rift.load_rift("nova")["apps"]], ["editor"])
+
+    def test_revert_without_history_is_an_error(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.rift_path("solo"), {"schemaVersion": 1, "slug": "solo", "name": "Solo", "apps": []})
+        with self.assertRaisesRegex(ValueError, "Nothing to revert"):
+            rift.revert_rift("solo")
 
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(
@@ -181,6 +297,33 @@ class RiftHelperTests(unittest.TestCase):
             result = rift.startup_open()
         self.assertEqual(result["action"], "startup")
         open_rift.assert_called_once_with("nova")
+
+    def test_startup_lock_fallback_stays_in_private_state_directory(self):
+        with patch.dict(rift.os.environ, {}, clear=False):
+            rift.os.environ.pop("XDG_RUNTIME_DIR", None)
+            path = rift.startup_lock_path()
+        self.assertEqual(path, rift.STATE_ROOT / "locks/startup.lock")
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_startup_lock_rejects_symlink_without_touching_target(self):
+        with patch.dict(rift.os.environ, {}, clear=False):
+            rift.os.environ.pop("XDG_RUNTIME_DIR", None)
+            path = rift.startup_lock_path()
+            victim = Path(self.temp.name) / "victim"
+            victim.write_text("keep me")
+            path.symlink_to(victim)
+
+            with self.assertRaises(OSError):
+                rift.startup_open()
+
+        self.assertEqual(victim.read_text(), "keep me")
+
+    def test_startup_lock_contention_reports_already_running(self):
+        with patch.dict(rift.os.environ, {}, clear=False):
+            rift.os.environ.pop("XDG_RUNTIME_DIR", None)
+            with rift.startup_lock() as lock:
+                rift.fcntl.flock(lock.fileno(), rift.fcntl.LOCK_EX | rift.fcntl.LOCK_NB)
+                self.assertEqual(rift.startup_open(), {"action": "already-running"})
 
 
 if __name__ == "__main__":

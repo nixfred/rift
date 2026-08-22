@@ -128,16 +128,24 @@ Panel {
 
   function openRift(slug) { runAction("open", ["open", slug]) }
 
-  function createFreshWorkspace() {
-    runAction("new", ["new-workspace"])
+  function beginNewRift() { beginSave("") }
+
+  function headerAction() {
+    if (currentRift) updateCurrent()
+    else beginNewRift()
+  }
+
+  function revertCurrent() {
+    if (currentRift && currentRift.previous) runAction("revert", ["revert", currentRift.slug])
   }
 
   function toggleStartup(rift) {
     runAction("startup", ["startup", rift.slug, rift.startup ? "off" : "on"])
   }
 
+  // One-click: re-record whatever is on this workspace under the current Rift's name.
   function updateCurrent() {
-    if (currentRift) beginSave(currentRift.name)
+    if (currentRift) runAction("update", ["save", currentRift.name])
   }
 
   function moveSelection(delta) {
@@ -167,7 +175,6 @@ Panel {
         root.stateData = response.data
         console.debug("rift: state workspace", response.data.workspace.id, "apps:", response.data.apps.length, "rifts:", response.data.rifts.length, "current:", response.data.currentRift || "-")
         if (root.selectedIndex >= root.rifts.length) root.selectedIndex = Math.max(0, root.rifts.length - 1)
-        if (root.mode === "new-loading") root.beginSave("")
       } catch (error) {
         console.warn("rift: state failed:", String(error.message || error), "raw:", root.stateOutput.slice(0, 300))
         root.errorText = String(error.message || error)
@@ -190,8 +197,14 @@ Panel {
           else
             root.notify("Rift opened", response.data.launched + " application" + (response.data.launched === 1 ? " is" : "s are") + " launching on workspace " + response.data.workspace + ".")
           root.close()
-        } else if (root.pendingAction === "new") {
-          root.mode = "new-loading"
+        } else if (root.pendingAction === "update") {
+          root.mode = "browse"
+          root.statusText = "Updated " + response.data.name + " · " + response.data.apps.length + " application" + (response.data.apps.length === 1 ? "" : "s")
+          root.notify("Rift updated", response.data.name + " now has " + response.data.apps.length + " application" + (response.data.apps.length === 1 ? "" : "s"))
+          root.refresh()
+        } else if (root.pendingAction === "revert") {
+          root.statusText = "Reverted " + response.data.name + " to its previous recipe"
+          root.notify("Rift reverted", response.data.name)
           root.refresh()
         } else if (root.pendingAction === "save") {
           root.mode = "browse"
@@ -228,9 +241,10 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(text) {
-        if (text === "n" || text === "N") root.createFreshWorkspace()
+        if (text === "n" || text === "N") root.beginNewRift()
         else if (text === "s" || text === "S") root.beginSave(root.currentRift ? root.currentRift.name : "")
         else if ((text === "u" || text === "U") && root.currentRift) root.updateCurrent()
+        else if ((text === "r" || text === "R") && root.currentRift && root.currentRift.previous) root.revertCurrent()
       }
 
       Flickable {
@@ -283,12 +297,15 @@ Panel {
 
             Button {
               id: freshButton
-              iconText: "＋"
-              tooltipText: "Fresh workspace · N"
+              iconText: root.currentRift ? "󰑐" : "＋"
+              tooltipText: root.currentRift
+                ? ("Update " + root.currentRift.name + " with this workspace · U")
+                : "Save this workspace as a new Rift · N"
               foreground: root.foreground
+              active: root.currentRift ? root.stateData.changed === true : false
               focusable: true
               enabled: !actionProcess.running
-              onClicked: root.createFreshWorkspace()
+              onClicked: root.headerAction()
             }
           }
 
@@ -307,16 +324,30 @@ Panel {
             Button {
               width: parent.width
               text: root.currentRift
-                ? (root.stateData.changed ? "Update " + root.currentRift.name : root.currentRift.name + " is up to date")
+                ? (root.stateData.changed ? "Update " + root.currentRift.name + " with this workspace" : root.currentRift.name + " is up to date")
                 : "Save this workspace as a Rift"
               iconText: root.currentRift ? (root.stateData.changed ? "󰑐" : "󰄬") : "󰆓"
               leftAlign: true
               foreground: root.foreground
               active: root.currentRift && !root.stateData.changed
               focusable: true
+              enabled: !actionProcess.running
               onClicked: {
-                if (!root.currentRift || root.stateData.changed) root.beginSave(root.currentRift ? root.currentRift.name : "")
+                if (root.currentRift && root.stateData.changed) root.updateCurrent()
+                else if (!root.currentRift) root.beginNewRift()
               }
+            }
+
+            Button {
+              visible: root.currentRift && root.currentRift.previous ? true : false
+              width: parent.width
+              text: "Revert " + (root.currentRift ? root.currentRift.name : "") + " to its previous recipe"
+              iconText: "󰕌"
+              leftAlign: true
+              foreground: root.foreground
+              focusable: true
+              enabled: !actionProcess.running
+              onClicked: root.revertCurrent()
             }
 
             Text {
