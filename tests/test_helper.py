@@ -523,6 +523,21 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(rift.resume_command({"command": ["python3", "-m", "http.server"], "program": "python3"}), [])
         self.assertEqual(rift.resume_command({"command": [], "program": ""}), [])
         self.assertEqual(rift.resume_command({"command": ["claude", "--continue"], "program": "claude"}), ["claude", "--continue"])
+        self.assertEqual(
+            rift.resume_command({"command": ["claude", "--dangerously-skip-permissions"], "program": "claude"}),
+            ["claude", "--dangerously-skip-permissions", "--continue"],
+        )
+        self.assertEqual(rift.resume_command({"command": ["claude", "mcp"], "program": "claude"}), [])
+        self.assertEqual(rift.resume_command({"command": ["claude", "doctor"], "program": "claude"}), [])
+        self.assertEqual(rift.resume_command({"command": ["claude", "-p", "hello"], "program": "claude"}), [])
+        self.assertEqual(rift.resume_command({"command": ["claude", "--print"], "program": "claude"}), [])
+        self.assertEqual(
+            rift.resume_command({
+                "command": ["claude", "--append-system-prompt-file", "/x/LARRY.md", "--dangerously-skip-permissions"],
+                "program": "claude",
+            }),
+            ["claude", "--append-system-prompt-file", "/x/LARRY.md", "--dangerously-skip-permissions", "--continue"],
+        )
 
     def test_terminal_recipe_runs_command_per_terminal(self):
         self.assertEqual(rift.terminal_recipe("ghostty", "/p", ["btop"]), ["ghostty", "--working-directory=/p", "--wait-after-command=true", "-e", "btop"])

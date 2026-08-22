@@ -196,6 +196,25 @@ TERMINAL_HELPERS = {"kitten", "ghostty", "alacritty", "foot", "wezterm-gui", "we
 # Programs that know how to pick their own session back up. The recipe we
 # replay is argv with the resume flag appended, so Fred's wrapper flags survive.
 RESUMABLE = {"claude", "codex"}
+# `claude [options] [command] [prompt]` — these positionals are admin CLIs,
+# not an interactive coding session. Replaying them with --continue is wrong.
+CLAUDE_SUBCOMMANDS = {
+    "agents",
+    "auth",
+    "auto-mode",
+    "doctor",
+    "gateway",
+    "import",
+    "install",
+    "mcp",
+    "plugin",
+    "plugins",
+    "project",
+    "setup-token",
+    "ultrareview",
+    "update",
+    "upgrade",
+}
 # Plain TUI programs that are safe and useful to relaunch exactly as seen.
 REPLAYABLE = {
     "nvim", "vim", "vi", "hx", "helix", "nano", "micro", "emacs",
@@ -304,6 +323,17 @@ def resume_command(session: dict[str, Any]) -> list[str]:
     if not argv or not program:
         return []
     if program == "claude":
+        # Print/SDK mode and admin subcommands are not sessions to resume.
+        if any(token in {"-p", "--print"} for token in argv):
+            return []
+        for token in argv[1:]:
+            if token == "--":
+                break
+            if token.startswith("-"):
+                continue
+            if token in CLAUDE_SUBCOMMANDS:
+                return []
+            break
         # --continue picks up the most recent conversation in this directory,
         # so a Claude Code session really does come back as that session.
         if not any(flag in argv for flag in ("--continue", "-c", "--resume", "-r")):
