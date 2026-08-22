@@ -191,19 +191,25 @@ bind = SUPER, R, exec, omarchy-shell nixfred.rift toggle
 
 ## Roadmap
 
-- [x] Delete and rename from the panel
-- [ ] Per-app launch delay & ordering
-- [ ] Optional `exec` override per app in the save panel
+Unfreeze path (in progress — see [AGENTS.md](AGENTS.md)):
+
+- [ ] Named Hyprland workspaces (`rift-<slug>`) as the identity, not recycled numeric ids
+- [ ] Entry **is** the recipe: cwd, command, resume policy visible and togglable
+- [ ] Selective drift review
+
+Frozen until that path is boring: launch stages, import/export, templates, project-aware recipes, tmux/SSH persistence.
 
 ## Contributing
 
+**AIs (Codex, Larry, Grok):** read **[AGENTS.md](AGENTS.md)** first. Feature freeze, working trees, and `Agent:` trailers live there.
+
+Humans: [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ```bash
 git clone https://github.com/nixfred/rift.git && cd rift
-python3 -m unittest discover -s tests -v   # backend tests
+python3 -m unittest discover -s tests -v   # backend tests (does not cover QML)
 omarchy plugin validate .                  # manifest check
 ```
-
-Issues and PRs welcome. Keep the helper stdlib-only and the QML in Omarchy's house style.
 
 ## License
 
