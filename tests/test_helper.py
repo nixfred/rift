@@ -786,9 +786,10 @@ class RiftHelperTests(unittest.TestCase):
             rift, "hypr_json", return_value=[{"id": 9, "windows": 1}]
         ), patch.object(rift, "launch_app_result", side_effect=launch):
             result = rift.open_rift("nova")
-
-        self.assertEqual(result["action"], "opened")
-        self.assertEqual(rift.runtime_state()["open"]["nova"]["workspace_id"], 9)
+            # Assert while hypr_json is still patched: outside the block the
+            # liveness rule consults the REAL compositor and prunes workspace 9.
+            self.assertEqual(result["action"], "opened")
+            self.assertEqual(rift.runtime_state()["open"]["nova"]["workspace_id"], 9)
 
     def test_partial_startup_does_not_write_completion_marker(self):
         rift.ensure_dirs()
