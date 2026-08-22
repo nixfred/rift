@@ -2,6 +2,10 @@
 
 All notable changes to Rift. The version shown in the panel header (`RIFTS vX.Y.Z`) and bar tooltip is the one in `manifest.json`; tests keep them in lockstep.
 
+## v0.3.6 — 2026-08-21 · Capture through multi-threaded wrappers
+
+- `child_pids` unions the `children` of every thread: `kitten run-shell` (and other Go/Rust wrappers) fork from worker threads, so Rift-launched terminals (`kitty --hold claude …`) previously looked empty and an Update degraded them to a bare terminal. Verified live: `kitty → kitten run-shell → btop` now captures `btop`
+
 ## v0.3.5 — 2026-08-21 · Open means whole (CORE)
 
 Fred quit the `voice` Rift's terminal, opened the Rift from elsewhere, and got a focus instead of Claude. Three fixes:

@@ -226,11 +226,32 @@ GUI_ARGV_APPS = {"code", "code-oss", "codium", "cursor", "zed", "zeditor", "wind
 
 
 def child_pids(pid: int) -> list[int]:
+    # Union the children of EVERY thread: multi-threaded parents (kitten
+    # run-shell, Go/Rust helpers) fork from worker threads, so the main
+    # thread's children file is empty even though `pgrep -P` sees the child.
+    task_dir = Path("/proc") / str(pid) / "task"
     try:
-        text = (Path("/proc") / str(pid) / "task" / str(pid) / "children").read_text()
-        return [int(part) for part in text.split()]
-    except (OSError, ValueError):
-        pass
+        tasks = list(task_dir.iterdir())
+    except OSError:
+        tasks = []
+    if tasks:
+        found: list[int] = []
+        readable = False
+        for task in tasks:
+            try:
+                text = (task / "children").read_text()
+            except (OSError, ValueError):
+                continue
+            readable = True
+            for part in text.split():
+                try:
+                    value = int(part)
+                except ValueError:
+                    continue
+                if value not in found:
+                    found.append(value)
+        if readable:
+            return found
     result = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
