@@ -639,6 +639,24 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(app["launch"], ["/usr/bin/code", str(project.resolve())])
         self.assertIn(str(project.resolve()), app["id"])
 
+    def test_state_reports_failed_apps_per_open_rift(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.rift_path("nova"), {"schemaVersion": 1, "slug": "nova", "name": "Nova", "apps": [{"id": "a", "launch": ["a"]}]})
+        rift.atomic_json(
+            rift.RUNTIME_FILE,
+            {"signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+             "open": {"nova": {"workspace_id": 3, "workspace_name": "3", "failed_apps": ["a"]}}},
+        )
+        def fake_hypr(subject):
+            return {"workspaces": [{"id": 3, "windows": 1}], "activeworkspace": {"id": 3, "name": "3"}, "clients": []}[subject]
+        with patch.object(rift, "hypr_json", side_effect=fake_hypr), patch.object(rift, "desktop_entries", return_value=[]):
+            state = rift.state_payload()
+        nova = next(r for r in state["rifts"] if r["slug"] == "nova")
+        self.assertEqual(nova["failedApps"], ["a"])
+        self.assertEqual(nova["openWorkspace"], 3)
+        rift.set_startup("nova", True)
+        self.assertNotIn("failedApps", rift.read_json(rift.rift_path("nova"), {}))
+
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(
             rift.terminal_recipe("ghostty", "/tmp/nova"),

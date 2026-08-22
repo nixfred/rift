@@ -2,6 +2,12 @@
 
 All notable changes to Rift. The version shown in the panel header (`RIFTS vX.Y.Z`) and bar tooltip is the one in `manifest.json`; tests keep them in lockstep.
 
+## v0.3.3 — 2026-08-21 · Launch results in the entry (#20)
+
+- Opening a Rift that partially fails no longer just fires a notification: the entry shows **each app** with ✓ launched / ⟳ already running / ✗ failed + the reason
+- **Retry** is one click: the entry's main button becomes "Retry N failed apps on workspace X" (helper retries only the stragglers), or "Try again on a fresh workspace" after a total failure
+- State reports `failedApps` per open Rift, so the warning persists across panel opens until the apps come up
+
 ## v0.3.2 — 2026-08-21 · Capture & save hardening (Codex/Grok PRs #35–#44)
 
 - Foreground program captured via the terminal's **tpgid** (process group), not `/proc` child order — background jobs can't masquerade; `kitty -e claude` (no shell) captured too (#42)
