@@ -619,7 +619,11 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(rift.terminal_recipe("ghostty", "/p", ["btop"]), ["ghostty", "--working-directory=/p", "--wait-after-command=true", "-e", "btop"])
         self.assertEqual(rift.terminal_recipe("alacritty", "/p", ["btop"]), ["alacritty", "--working-directory", "/p", "--hold", "-e", "btop"])
         self.assertEqual(rift.terminal_recipe("kitty", "/p", ["btop"]), ["kitty", "--directory", "/p", "--hold", "btop"])
-        self.assertEqual(rift.terminal_recipe("wezterm", "/p", ["btop"]), ["wezterm", "start", "--cwd", "/p", "--", "btop"])
+        self.assertEqual(
+            rift.terminal_recipe("wezterm", "/p", ["btop"]),
+            ["wezterm", "start", "--cwd", "/p", "--", "sh", "-c", 'exec "$0" "$@"; exec "${SHELL:-/bin/sh}"', "btop"],
+        )
+        self.assertEqual(rift.terminal_recipe("wezterm", "/p", []), ["wezterm", "start", "--cwd", "/p"])
         self.assertEqual(rift.terminal_recipe("foot", "", []), ["foot"])
 
     def test_resolved_directory_args_uses_process_cwd_not_helper_cwd(self):

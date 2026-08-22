@@ -467,7 +467,11 @@ def terminal_recipe(binary: str, cwd: str, command: list[str] | None = None) -> 
         return recipe + ["--hold", *command] if command else recipe
     if binary == "wezterm":
         recipe = [binary, "start", "--cwd", cwd] if cwd else [binary, "start"]
-        return recipe + ["--", *command] if command else recipe
+        if not command:
+            return recipe
+        # wezterm start has no --hold; keep a shell after the program exits
+        # the way kitty --hold / foot --hold do.
+        return recipe + ["--", "sh", "-c", 'exec "$0" "$@"; exec "${SHELL:-/bin/sh}"', *command]
     return [binary] + command
 
 
