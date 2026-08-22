@@ -383,7 +383,17 @@ def launch_app(app: dict[str, Any], rift: dict[str, Any]) -> bool:
     env = os.environ.copy()
     env["RIFT_NAME"] = str(rift.get("name", ""))
     env["RIFT_SLUG"] = str(rift.get("slug", ""))
-    subprocess.Popen(argv, cwd=cwd, env=env, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=env,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, TypeError, ValueError):
+        return False
     return True
 
 

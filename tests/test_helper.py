@@ -131,6 +131,20 @@ class RiftHelperTests(unittest.TestCase):
             ["ghostty", "--working-directory=/tmp/nova"],
         )
 
+    def test_unlaunchable_app_does_not_abort_rift(self):
+        broken = {"launch": ["missing-app"], "cwd": "", "policy": "launch"}
+        working = {"launch": ["working-app"], "cwd": "", "policy": "launch"}
+        saved = {"name": "Nova", "slug": "nova"}
+
+        with patch.object(
+            rift.subprocess,
+            "Popen",
+            side_effect=[FileNotFoundError("missing-app"), unittest.mock.DEFAULT],
+        ) as popen:
+            launched = [rift.launch_app(app, saved) for app in (broken, working)]
+
+        self.assertEqual(launched, [False, True])
+        self.assertEqual(popen.call_count, 2)
     def test_failed_startup_can_be_retried(self):
         rift.ensure_dirs()
         rift.atomic_json(
