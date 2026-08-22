@@ -716,11 +716,11 @@ def rename_rift(slug: str, new_name: str) -> dict[str, Any]:
     rift["slug"] = new_slug
     persist_rift(rift)
     if new_slug != old_slug:
-        rift_path(old_slug).unlink(missing_ok=True)
         with runtime_transaction() as runtime:
             association = runtime.get("open", {}).pop(old_slug, None)
             if association:
                 runtime["open"][new_slug] = association
+        rift_path(old_slug).unlink(missing_ok=True)
     return rift
 
 
