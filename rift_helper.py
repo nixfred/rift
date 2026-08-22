@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+from contextlib import contextmanager
 import fcntl
 import json
 import os
@@ -19,7 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import Any, Iterator
 
 
 CONFIG_ROOT = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rift"
@@ -76,6 +77,11 @@ def atomic_json(path: Path, value: Any) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         temp.replace(path)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -314,6 +320,17 @@ def save_runtime(state: dict[str, Any]) -> None:
     atomic_json(RUNTIME_FILE, state)
 
 
+@contextmanager
+def runtime_transaction() -> Iterator[dict[str, Any]]:
+    """Serialize a complete runtime-state read, mutation, and replacement."""
+    ensure_dirs()
+    with (STATE_ROOT / "runtime.lock").open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        state = runtime_state()
+        yield state
+        save_runtime(state)
+
+
 def state_payload() -> dict[str, Any]:
     workspace = current_workspace()
     apps = current_apps()
@@ -356,17 +373,16 @@ def save_rift(name: str, include_ids: list[str] | None = None) -> dict[str, Any]
     atomic_json(rift_path(slug), value)
     workspace = current_workspace()
     workspace_id = int(workspace.get("id", 0))
-    runtime = runtime_state()
-    runtime["open"] = {
-        open_slug: association
-        for open_slug, association in runtime.get("open", {}).items()
-        if open_slug == slug or int(association.get("workspace_id", 0)) != workspace_id
-    }
-    runtime.setdefault("open", {})[slug] = {
-        "workspace_id": workspace_id,
-        "workspace_name": str(workspace.get("name", "")),
-    }
-    save_runtime(runtime)
+    with runtime_transaction() as runtime:
+        runtime["open"] = {
+            open_slug: association
+            for open_slug, association in runtime.get("open", {}).items()
+            if open_slug == slug or int(association.get("workspace_id", 0)) != workspace_id
+        }
+        runtime.setdefault("open", {})[slug] = {
+            "workspace_id": workspace_id,
+            "workspace_name": str(workspace.get("name", "")),
+        }
     return value
 
 
@@ -411,21 +427,20 @@ def launch_app(app: dict[str, Any], rift: dict[str, Any]) -> bool:
 
 def open_rift(slug: str) -> dict[str, Any]:
     rift = load_rift(slug)
-    runtime = runtime_state()
-    association = runtime.get("open", {}).get(rift["slug"])
-    if association:
-        hypr_dispatch("workspace", str(association["workspace_id"]))
-        return {"action": "focused", "rift": rift["slug"], "workspace": association["workspace_id"]}
+    with runtime_transaction() as runtime:
+        association = runtime.get("open", {}).get(rift["slug"])
+        if association:
+            hypr_dispatch("workspace", str(association["workspace_id"]))
+            return {"action": "focused", "rift": rift["slug"], "workspace": association["workspace_id"]}
 
-    hypr_dispatch("workspace", "emptyn")
-    time.sleep(0.12)
-    workspace = current_workspace()
-    workspace_id = int(workspace.get("id", 0))
-    runtime.setdefault("open", {})[rift["slug"]] = {
-        "workspace_id": workspace_id,
-        "workspace_name": str(workspace.get("name", "")),
-    }
-    save_runtime(runtime)
+        hypr_dispatch("workspace", "emptyn")
+        time.sleep(0.12)
+        workspace = current_workspace()
+        workspace_id = int(workspace.get("id", 0))
+        runtime.setdefault("open", {})[rift["slug"]] = {
+            "workspace_id": workspace_id,
+            "workspace_name": str(workspace.get("name", "")),
+        }
     launched = sum(1 for app in rift.get("apps", []) if launch_app(app, rift))
     return {"action": "opened", "rift": rift["slug"], "workspace": workspace_id, "launched": launched}
 
@@ -449,9 +464,8 @@ def delete_rift(slug: str) -> None:
     if not path.exists():
         raise ValueError(f"Rift not found: {slug}")
     path.unlink()
-    runtime = runtime_state()
-    runtime.get("open", {}).pop(slugify(slug), None)
-    save_runtime(runtime)
+    with runtime_transaction() as runtime:
+        runtime.get("open", {}).pop(slugify(slug), None)
 
 
 def startup_open() -> dict[str, Any]:
