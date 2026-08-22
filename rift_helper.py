@@ -530,12 +530,13 @@ def app_is_running(app: dict[str, Any]) -> bool:
         return False
 
 
-def launch_app(app: dict[str, Any], rift: dict[str, Any]) -> bool:
+def launch_app_result(app: dict[str, Any], rift: dict[str, Any]) -> dict[str, str]:
+    identity = str(app.get("id") or app.get("name") or "unknown")
     if app.get("policy") == "ensure" and app_is_running(app):
-        return False
+        return {"app": identity, "status": "already-running"}
     argv = app.get("launch") or []
     if not isinstance(argv, list) or not argv:
-        return False
+        return {"app": identity, "status": "failed", "error": "Invalid launch recipe"}
     cwd = str(app.get("cwd") or "")
     if not cwd or not Path(cwd).is_dir():
         cwd = str(Path.home())
@@ -551,9 +552,13 @@ def launch_app(app: dict[str, Any], rift: dict[str, Any]) -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    except (OSError, TypeError, ValueError):
-        return False
-    return True
+    except (OSError, TypeError, ValueError) as error:
+        return {"app": identity, "status": "failed", "error": str(error)}
+    return {"app": identity, "status": "launched"}
+
+
+def launch_app(app: dict[str, Any], rift: dict[str, Any]) -> bool:
+    return launch_app_result(app, rift)["status"] == "launched"
 
 
 def wait_for_workspace_change(previous_id: int, timeout: float = 2.0) -> dict[str, Any]:
@@ -574,22 +579,59 @@ def open_rift(slug: str) -> dict[str, Any]:
         association = runtime.get("open", {}).get(rift["slug"])
         if association:
             hypr_dispatch("workspace", str(association["workspace_id"]))
+            pending = set(association.get("failed_apps", []))
+            if pending:
+                retry_apps = [app for app in rift.get("apps", []) if str(app.get("id", "")) in pending]
+                results = [launch_app_result(app, rift) for app in retry_apps]
+                remaining = [result["app"] for result in results if result["status"] == "failed"]
+                if remaining:
+                    association["failed_apps"] = remaining
+                else:
+                    association.pop("failed_apps", None)
+                launched = sum(result["status"] == "launched" for result in results)
+                return {
+                    "action": "partial" if remaining else "opened",
+                    "rift": rift["slug"],
+                    "workspace": association["workspace_id"],
+                    "launched": launched,
+                    "failed": len(remaining),
+                    "results": results,
+                }
             return {"action": "focused", "rift": rift["slug"], "workspace": association["workspace_id"]}
 
         previous_id = int(current_workspace().get("id", 0))
         hypr_dispatch("workspace", "emptyn")
         workspace = wait_for_workspace_change(previous_id)
         workspace_id = int(workspace.get("id", 0))
+        apps = rift.get("apps", [])
+        results = [launch_app_result(app, rift) for app in apps]
+        launched = sum(result["status"] == "launched" for result in results)
+        satisfied = sum(result["status"] in {"launched", "already-running"} for result in results)
+        failed = len(results) - satisfied
+        if apps and satisfied == 0:
+            return {
+                "action": "failed",
+                "rift": rift["slug"],
+                "workspace": workspace_id,
+                "launched": 0,
+                "failed": failed,
+                "results": results,
+            }
         runtime.setdefault("open", {})[rift["slug"]] = {
             "workspace_id": workspace_id,
             "workspace_name": str(workspace.get("name", "")),
         }
-    launched = sum(1 for app in rift.get("apps", []) if launch_app(app, rift))
+        if failed:
+            runtime["open"][rift["slug"]]["failed_apps"] = [
+                result["app"] for result in results if result["status"] == "failed"
+            ]
     return {
-        "action": "opened",
+        "action": "partial" if failed else "opened",
         "rift": rift["slug"],
         "workspace": workspace_id,
         "launched": launched,
+        "failed": failed,
+        "results": results,
         "validationErrors": rift.get("validationErrors", []),
     }
 
@@ -644,7 +686,10 @@ def startup_open() -> dict[str, Any]:
         opened = []
         for rift in load_rifts():
             if rift.get("startup"):
-                opened.append(open_rift(rift["slug"]))
+                result = open_rift(rift["slug"])
+                if result.get("action") in {"failed", "partial"}:
+                    raise RuntimeError(f"Startup Rift needs retry: {rift['slug']}")
+                opened.append(result)
                 time.sleep(0.25)
         marker.touch()
         return {"action": "startup", "opened": opened}

@@ -192,11 +192,20 @@ Panel {
         var response = JSON.parse(root.actionOutput)
         if (!response.ok) throw new Error(response.error || "Rift action failed")
         if (root.pendingAction === "open") {
-          if (response.data.action === "focused")
+          if (response.data.action === "failed") {
+            root.errorText = "No applications could be launched. Fix the saved recipes or try again."
+            root.notify("Rift could not open", response.data.failed + " application" + (response.data.failed === 1 ? " needs" : "s need") + " attention.")
+            root.refresh()
+          } else if (response.data.action === "focused") {
             root.notify("Rift focused", "Switched to workspace " + response.data.workspace + ".")
-          else
+            root.close()
+          } else if (response.data.action === "partial") {
+            root.notify("Rift partially opened", response.data.launched + " launched · " + response.data.failed + " failed on workspace " + response.data.workspace + ".")
+            root.close()
+          } else {
             root.notify("Rift opened", response.data.launched + " application" + (response.data.launched === 1 ? " is" : "s are") + " launching on workspace " + response.data.workspace + ".")
-          root.close()
+            root.close()
+          }
         } else if (root.pendingAction === "update") {
           root.mode = "browse"
           root.statusText = "Updated " + response.data.name + " · " + response.data.apps.length + " application" + (response.data.apps.length === 1 ? "" : "s")
