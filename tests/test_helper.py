@@ -143,6 +143,31 @@ class RiftHelperTests(unittest.TestCase):
             rift.hypr_dispatch("workspace", "3")
         self.assertEqual(calls, [["hl.dsp.focus({ workspace = 3 })"], ["workspace", "3"]])
 
+    def test_update_keeps_previous_recipe_and_revert_swaps_it_back(self):
+        first = [{"id": "editor", "name": "Editor", "selected": True}]
+        second = [{"id": "browser", "name": "Browser", "selected": True}]
+        with patch.object(rift, "current_workspace", return_value={"id": 3, "name": "3"}), patch.object(
+            rift, "hypr_json", return_value=[{"id": 3}]
+        ):
+            with patch.object(rift, "current_apps", return_value=first):
+                rift.save_rift("Nova")
+            with patch.object(rift, "current_apps", return_value=second):
+                updated = rift.save_rift("Nova")
+
+        self.assertEqual([a["id"] for a in updated["apps"]], ["browser"])
+        self.assertEqual([a["id"] for a in updated["previous"]["apps"]], ["editor"])
+
+        reverted = rift.revert_rift("nova")
+        self.assertEqual([a["id"] for a in reverted["apps"]], ["editor"])
+        self.assertEqual([a["id"] for a in reverted["previous"]["apps"]], ["browser"])
+        self.assertEqual([a["id"] for a in rift.load_rift("nova")["apps"]], ["editor"])
+
+    def test_revert_without_history_is_an_error(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.rift_path("solo"), {"schemaVersion": 1, "slug": "solo", "name": "Solo", "apps": []})
+        with self.assertRaisesRegex(ValueError, "Nothing to revert"):
+            rift.revert_rift("solo")
+
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(
             rift.terminal_recipe("ghostty", "/tmp/nova"),

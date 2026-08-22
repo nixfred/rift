@@ -353,6 +353,11 @@ def save_rift(name: str, include_ids: list[str] | None = None) -> dict[str, Any]
         "apps": apps,
         "savedAt": int(time.time()),
     }
+    # Keep the recipe we are replacing so the panel can offer a one-click revert.
+    if isinstance(existing.get("apps"), list) and existing.get("apps") != apps:
+        value["previous"] = {"apps": existing["apps"], "savedAt": existing.get("savedAt", 0)}
+    elif existing.get("previous"):
+        value["previous"] = existing["previous"]
     atomic_json(rift_path(slug), value)
     workspace = current_workspace()
     workspace_id = int(workspace.get("id", 0))
@@ -444,6 +449,19 @@ def set_startup(slug: str, enabled: bool) -> dict[str, Any]:
     return rift
 
 
+def revert_rift(slug: str) -> dict[str, Any]:
+    """Swap the current recipe with the previous one, so revert is itself revertible."""
+    rift = load_rift(slug)
+    previous = rift.get("previous")
+    if not isinstance(previous, dict) or not isinstance(previous.get("apps"), list):
+        raise ValueError(f"Nothing to revert for {rift.get('name', slug)}")
+    rift["previous"] = {"apps": rift.get("apps", []), "savedAt": rift.get("savedAt", 0)}
+    rift["apps"] = previous["apps"]
+    rift["savedAt"] = int(time.time())
+    atomic_json(rift_path(slug), rift)
+    return rift
+
+
 def delete_rift(slug: str) -> None:
     path = rift_path(slug)
     if not path.exists():
@@ -492,6 +510,8 @@ def parser() -> argparse.ArgumentParser:
     startup.add_argument("enabled", choices=["on", "off"])
     delete = sub.add_parser("delete")
     delete.add_argument("slug")
+    revert = sub.add_parser("revert")
+    revert.add_argument("slug")
     sub.add_parser("new-workspace")
     sub.add_parser("startup-open")
     return result
@@ -509,6 +529,8 @@ def main() -> int:
             emit(open_rift(args.slug))
         elif args.command == "startup":
             emit(set_startup(args.slug, args.enabled == "on"))
+        elif args.command == "revert":
+            emit(revert_rift(args.slug))
         elif args.command == "delete":
             delete_rift(args.slug)
             emit({"deleted": args.slug})
