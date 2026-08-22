@@ -207,6 +207,33 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(result["action"], "startup")
         open_rift.assert_called_once_with("nova")
 
+    def test_startup_lock_fallback_stays_in_private_state_directory(self):
+        with patch.dict(rift.os.environ, {}, clear=False):
+            rift.os.environ.pop("XDG_RUNTIME_DIR", None)
+            path = rift.startup_lock_path()
+        self.assertEqual(path, rift.STATE_ROOT / "locks/startup.lock")
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_startup_lock_rejects_symlink_without_touching_target(self):
+        with patch.dict(rift.os.environ, {}, clear=False):
+            rift.os.environ.pop("XDG_RUNTIME_DIR", None)
+            path = rift.startup_lock_path()
+            victim = Path(self.temp.name) / "victim"
+            victim.write_text("keep me")
+            path.symlink_to(victim)
+
+            with self.assertRaises(OSError):
+                rift.startup_open()
+
+        self.assertEqual(victim.read_text(), "keep me")
+
+    def test_startup_lock_contention_reports_already_running(self):
+        with patch.dict(rift.os.environ, {}, clear=False):
+            rift.os.environ.pop("XDG_RUNTIME_DIR", None)
+            with rift.startup_lock() as lock:
+                rift.fcntl.flock(lock.fileno(), rift.fcntl.LOCK_EX | rift.fcntl.LOCK_NB)
+                self.assertEqual(rift.startup_open(), {"action": "already-running"})
+
 
 if __name__ == "__main__":
     unittest.main()

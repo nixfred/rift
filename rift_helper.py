@@ -9,24 +9,25 @@ from __future__ import annotations
 
 import argparse
 import configparser
+from contextlib import contextmanager
 import fcntl
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import Any, Iterator
 
 
 CONFIG_ROOT = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rift"
 RIFTS_ROOT = CONFIG_ROOT / "rifts"
 STATE_ROOT = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "rift"
 RUNTIME_FILE = STATE_ROOT / "runtime.json"
-STARTUP_LOCK = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / f"rift-startup-{os.getuid()}.lock"
 
 IGNORED_CLASSES = {
     "omarchy-shell",
@@ -61,6 +62,31 @@ TERMINALS = {
 def ensure_dirs() -> None:
     RIFTS_ROOT.mkdir(parents=True, exist_ok=True)
     STATE_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def startup_lock_path() -> Path:
+    runtime_root = os.environ.get("XDG_RUNTIME_DIR")
+    directory = Path(runtime_root) / "rift" if runtime_root else STATE_ROOT / "locks"
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    info = directory.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise RuntimeError("Rift lock directory is not private and user-owned")
+    directory.chmod(0o700)
+    return directory / "startup.lock"
+
+
+@contextmanager
+def startup_lock() -> Iterator[Any]:
+    path = startup_lock_path()
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        os.close(descriptor)
+        raise RuntimeError("Rift startup lock is not a user-owned regular file")
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "r+") as lock:
+        yield lock
 
 
 def atomic_json(path: Path, value: Any) -> None:
@@ -474,7 +500,7 @@ def delete_rift(slug: str) -> None:
 
 def startup_open() -> dict[str, Any]:
     ensure_dirs()
-    with STARTUP_LOCK.open("w") as lock:
+    with startup_lock() as lock:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
