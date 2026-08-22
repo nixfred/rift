@@ -180,6 +180,8 @@ def process_info(pid: int) -> tuple[str, list[str], str]:
         cwd = str((proc / "cwd").resolve())
     except OSError:
         cwd = ""
+    if cwd.startswith("/proc/") or not cwd.startswith("/"):
+        cwd = ""  # symlink could not be resolved (process mid-exec or gone); unknown, not "/proc/…"
     return executable, argv, cwd
 
 

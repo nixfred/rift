@@ -745,6 +745,16 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(launched, ["t"])
         self.assertEqual(result["launched"], 1)
 
+    def test_process_info_never_returns_a_proc_path_as_cwd(self):
+        class FakePath:
+            def __init__(self, parts): self.parts = parts
+            def __truediv__(self, other): return FakePath(self.parts + [other])
+            def resolve(self): return "/proc/123/cwd" if self.parts[-1] == "cwd" else "/usr/bin/x"
+            def read_bytes(self): return b"x\0"
+        with patch.object(rift, "Path", lambda *a: FakePath(list(a))):
+            _exe, _argv, cwd = rift.process_info(123)
+        self.assertEqual(cwd, "")
+
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(
             rift.terminal_recipe("ghostty", "/tmp/nova"),
