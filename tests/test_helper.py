@@ -17,6 +17,8 @@ class RiftHelperTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
+        self.settings = patch.object(rift, "SETTINGS_FILE", root / "config/settings.json")
+        self.settings.start()
         self.config = patch.object(rift, "CONFIG_ROOT", root / "config")
         self.rifts = patch.object(rift, "RIFTS_ROOT", root / "config/rifts")
         self.state = patch.object(rift, "STATE_ROOT", root / "state")
@@ -103,14 +105,6 @@ class RiftHelperTests(unittest.TestCase):
         state = rift.read_json(rift.RUNTIME_FILE, {})
         self.assertEqual(set(state["open"]), {f"rift-{item}" for item in range(1, 9)})
 
-    def test_explicit_empty_selection_saves_no_apps(self):
-        apps = [{"id": "editor", "name": "Editor", "selected": True}]
-        with patch.object(rift, "current_apps", return_value=apps), patch.object(
-            rift, "current_workspace", return_value={"id": 2, "name": "2"}
-        ), patch.object(rift, "hypr_json", return_value=[{"id": 2}]):
-            saved = rift.save_rift("Empty", [])
-        self.assertEqual(saved["apps"], [])
-
     def test_save_replaces_existing_rift_association_on_workspace(self):
         rift.ensure_dirs()
         rift.atomic_json(
@@ -120,7 +114,11 @@ class RiftHelperTests(unittest.TestCase):
                 "open": {"old": {"workspace_id": 2, "workspace_name": "2"}},
             },
         )
-        with patch.object(rift, "current_apps", return_value=[]), patch.object(
+        with patch.object(
+            rift,
+            "current_apps",
+            return_value=[{"id": "editor", "name": "Editor", "selected": True, "launch": ["editor"]}],
+        ), patch.object(
             rift, "current_workspace", return_value={"id": 2, "name": "2"}
         ), patch.object(rift, "hypr_json", return_value=[{"id": 2}]):
             rift.save_rift("New")
@@ -172,6 +170,25 @@ class RiftHelperTests(unittest.TestCase):
                 rift.atomic_json(rift.RUNTIME_FILE, malformed)
                 with patch.object(rift, "hypr_json", return_value=[]):
                     self.assertEqual(rift.runtime_state(), {"signature": signature, "open": {}})
+
+    def test_runtime_state_preserves_valid_failed_app_ids(self):
+        signature = rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+        rift.atomic_json(
+            rift.RUNTIME_FILE,
+            {
+                "signature": signature,
+                "open": {
+                    "nova": {
+                        "workspace_id": 7,
+                        "workspace_name": "7",
+                        "failed_apps": ["desktop:slack", "", 42],
+                    }
+                },
+            },
+        )
+        with patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}]):
+            state = rift.runtime_state()
+        self.assertEqual(state["open"]["nova"]["failed_apps"], ["desktop:slack"])
 
     def test_load_rifts_skips_invalid_files_and_app_recipes(self):
         rift.ensure_dirs()
@@ -238,12 +255,12 @@ class RiftHelperTests(unittest.TestCase):
         first = [{"id": "editor", "name": "Editor", "selected": True, "launch": ["editor"]}]
         second = [{"id": "browser", "name": "Browser", "selected": True, "launch": ["browser"]}]
         with patch.object(rift, "current_workspace", return_value={"id": 3, "name": "3"}), patch.object(
-            rift, "hypr_json", return_value=[{"id": 3}]
+            rift, "hypr_json", return_value=[{"id": 3, "windows": 1}]
         ):
             with patch.object(rift, "current_apps", return_value=first):
                 rift.save_rift("Nova")
             with patch.object(rift, "current_apps", return_value=second):
-                updated = rift.save_rift("Nova")
+                updated = rift.save_rift("Nova", update_of="nova")
 
         self.assertEqual([a["id"] for a in updated["apps"]], ["browser"])
         self.assertEqual([a["id"] for a in updated["previous"]["apps"]], ["editor"])
@@ -300,6 +317,67 @@ class RiftHelperTests(unittest.TestCase):
                 rift.save_rift("Nova", expect_workspace=10, update_of="nova")
         self.assertFalse(rift.rift_path("nova").exists())
 
+    def test_save_refuses_to_overwrite_an_existing_rift_without_update_of(self):
+        rift.ensure_dirs()
+        rift.atomic_json(
+            rift.rift_path("nova"),
+            {
+                "schemaVersion": 1,
+                "slug": "nova",
+                "name": "Nova",
+                "startup": True,
+                "apps": [{"id": "keep", "launch": ["keep"]}],
+            },
+        )
+        rift.atomic_json(
+            rift.RUNTIME_FILE,
+            {
+                "signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+                "open": {"nova": {"workspace_id": 7, "workspace_name": "7"}},
+            },
+        )
+        with patch.object(rift, "current_workspace", return_value={"id": 10, "name": "10"}), patch.object(
+            rift,
+            "current_apps",
+            return_value=[{"id": "editor", "name": "Editor", "selected": True, "launch": ["editor"]}],
+        ), patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}, {"id": 10, "windows": 1}]):
+            with self.assertRaisesRegex(RuntimeError, "already exists"):
+                rift.save_rift("Nova")
+
+        stored = rift.read_json(rift.rift_path("nova"), {})
+        self.assertEqual(stored["apps"][0]["id"], "keep")
+        self.assertTrue(stored["startup"])
+        self.assertEqual(rift.runtime_state()["open"]["nova"]["workspace_id"], 7)
+
+    def test_save_update_of_still_rewrites_the_intended_rift(self):
+        with patch.object(rift, "current_workspace", return_value={"id": 7, "name": "7"}), patch.object(
+            rift,
+            "current_apps",
+            return_value=[{"id": "editor", "name": "Editor", "selected": True, "launch": ["editor"]}],
+        ), patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}]):
+            rift.save_rift("Nova")
+            updated = rift.save_rift("Nova", update_of="nova")
+        self.assertEqual([app["id"] for app in updated["apps"]], ["editor"])
+    def test_save_refuses_an_empty_application_list(self):
+        with patch.object(rift, "current_workspace", return_value={"id": 4, "name": "4"}), patch.object(
+            rift, "current_apps", return_value=[]
+        ), patch.object(rift, "hypr_json", return_value=[{"id": 4, "windows": 1}]):
+            with self.assertRaisesRegex(ValueError, "at least one application"):
+                rift.save_rift("Empty")
+        self.assertFalse(rift.rift_path("empty").exists())
+
+        with patch.object(rift, "current_workspace", return_value={"id": 4, "name": "4"}), patch.object(
+            rift,
+            "current_apps",
+            return_value=[
+                {"id": "editor", "name": "Editor", "selected": True, "launch": ["editor"]},
+                {"id": "music", "name": "Music", "selected": False, "launch": ["music"]},
+            ],
+        ), patch.object(rift, "hypr_json", return_value=[{"id": 4, "windows": 1}]):
+            with self.assertRaisesRegex(ValueError, "at least one application"):
+                rift.save_rift("Empty", include_ids=[])
+        self.assertFalse(rift.rift_path("empty").exists())
+
     def test_empty_workspace_never_keeps_an_association(self):
         rift.atomic_json(
             rift.RUNTIME_FILE,
@@ -318,10 +396,142 @@ class RiftHelperTests(unittest.TestCase):
         ):
             for name in ("a", "b", "c"):
                 with patch.object(rift, "current_apps", return_value=[{"id": name, "name": name, "selected": True, "launch": [name]}]):
-                    rift.save_rift("Nova")
+                    rift.save_rift("Nova", update_of="nova" if name != "a" else None)
         self.assertEqual([h["apps"][0]["id"] for h in rift.load_rift("nova")["history"]], ["b", "a"])
         self.assertEqual(rift.revert_rift("nova")["apps"][0]["id"], "b")
         self.assertEqual(rift.revert_rift("nova")["apps"][0]["id"], "a")
+
+    def test_help_mode_is_on_for_new_users_until_first_save_and_can_be_reenabled(self):
+        rift.ensure_dirs()
+        self.assertTrue(rift.help_enabled())
+        with patch.object(rift, "current_workspace", return_value={"id": 2, "name": "2"}), patch.object(
+            rift, "current_apps", return_value=[{"id": "a", "name": "A", "selected": True, "launch": ["a"]}]
+        ), patch.object(rift, "hypr_json", return_value=[{"id": 2, "windows": 1}]):
+            rift.save_rift("First")
+        self.assertFalse(rift.help_enabled())
+        rift.set_help(True)
+        self.assertTrue(rift.help_enabled())
+        rift.set_help(False)
+        self.assertFalse(rift.help_enabled())
+
+    def test_rename_moves_file_and_association(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.rift_path("old"), {"schemaVersion": 1, "slug": "old", "name": "Old", "apps": []})
+        rift.atomic_json(
+            rift.RUNTIME_FILE,
+            {"signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+             "open": {"old": {"workspace_id": 4, "workspace_name": "4"}}},
+        )
+        with patch.object(rift, "hypr_json", return_value=[{"id": 4, "windows": 1}]):
+            renamed = rift.rename_rift("old", "Shiny New")
+            self.assertEqual(renamed["slug"], "shiny-new")
+            self.assertFalse(rift.rift_path("old").exists())
+            self.assertEqual(rift.runtime_state()["open"]["shiny-new"]["workspace_id"], 4)
+
+    def test_terminal_session_finds_shell_cwd_and_foreground_program(self):
+        # kitty(100) -> kitten(101), bash(102), kitten(103); bash -> claude(200)
+        tree = {100: [101, 102, 103], 102: [200]}
+        comm = {101: "kitten", 102: "bash", 103: "kitten", 200: "claude"}
+        info = {
+            100: ("/usr/bin/kitty", ["kitty"], "/home/pi"),
+            102: ("/usr/bin/bash", ["bash"], "/home/pi/Projects/rift"),
+            200: ("/usr/bin/node", ["claude", "--append-system-prompt-file", "/x/LARRY.md", "--dangerously-skip-permissions"], "/home/pi/Projects/rift"),
+        }
+        # bash pgrp 102, foreground pgroup is claude (200)
+        ids = {102: (100, 102, 200), 200: (102, 200, 200)}
+        with patch.object(rift, "child_pids", side_effect=lambda pid: tree.get(pid, [])), patch.object(
+            rift, "proc_comm", side_effect=lambda pid: comm.get(pid, "")
+        ), patch.object(rift, "process_info", side_effect=lambda pid: info.get(pid, ("", [], ""))), patch.object(
+            rift, "proc_ids", side_effect=lambda pid: ids.get(pid)
+        ):
+            session = rift.terminal_session(100)
+        self.assertEqual(session["cwd"], "/home/pi/Projects/rift")
+        self.assertEqual(session["program"], "claude")
+        resumed = rift.resume_command(session)
+        self.assertEqual(resumed[-1], "--continue")
+        self.assertIn("--dangerously-skip-permissions", resumed)
+        self.assertEqual(
+            rift.terminal_recipe("kitty", "/home/pi/Projects/rift", resumed)[:3],
+            ["kitty", "--directory", "/home/pi/Projects/rift"],
+        )
+
+    def test_terminal_session_ignores_background_jobs_listed_after_the_shell(self):
+        # /proc children order is not start order. reversed() used to pick sleep.
+        tree = {100: [10], 10: [12, 11]}
+        comm = {10: "zsh", 11: "sleep", 12: "claude"}
+        info = {
+            10: ("/bin/zsh", ["zsh"], "/work"),
+            11: ("/bin/sleep", ["sleep", "100"], "/work"),
+            12: ("/usr/bin/claude", ["claude"], "/work"),
+        }
+        ids = {10: (100, 10, 12), 11: (10, 11, 12), 12: (10, 12, 12)}
+        with patch.object(rift, "child_pids", side_effect=lambda pid: tree.get(pid, [])), patch.object(
+            rift, "proc_comm", side_effect=lambda pid: comm.get(pid, "")
+        ), patch.object(rift, "process_info", side_effect=lambda pid: info.get(pid, ("", [], ""))), patch.object(
+            rift, "proc_ids", side_effect=lambda pid: ids.get(pid)
+        ):
+            session = rift.terminal_session(100)
+        self.assertEqual(session["program"], "claude")
+        self.assertEqual(session["command"], ["claude"])
+
+    def test_terminal_session_captures_direct_minus_e_without_a_shell(self):
+        tree = {100: [200]}
+        comm = {200: "claude"}
+        info = {
+            100: ("/usr/bin/kitty", ["kitty", "-e", "claude"], "/home/pi"),
+            200: ("/usr/bin/claude", ["claude"], "/proj"),
+        }
+        ids = {100: (1, 100, 200), 200: (100, 200, 200)}
+        with patch.object(rift, "child_pids", side_effect=lambda pid: tree.get(pid, [])), patch.object(
+            rift, "proc_comm", side_effect=lambda pid: comm.get(pid, "")
+        ), patch.object(rift, "process_info", side_effect=lambda pid: info.get(pid, ("", [], ""))), patch.object(
+            rift, "proc_ids", side_effect=lambda pid: ids.get(pid)
+        ):
+            session = rift.terminal_session(100)
+        self.assertEqual(session["program"], "claude")
+        self.assertEqual(session["cwd"], "/proj")
+
+    def test_resume_command_policy(self):
+        self.assertEqual(rift.resume_command({"command": ["codex", "--yolo"], "program": "codex"}), ["codex", "resume", "--last"])
+        self.assertEqual(rift.resume_command({"command": ["nvim", "a.py"], "program": "nvim"}), ["nvim", "a.py"])
+        self.assertEqual(rift.resume_command({"command": ["python3", "-m", "http.server"], "program": "python3"}), [])
+        self.assertEqual(rift.resume_command({"command": [], "program": ""}), [])
+        self.assertEqual(rift.resume_command({"command": ["claude", "--continue"], "program": "claude"}), ["claude", "--continue"])
+
+    def test_terminal_recipe_runs_command_per_terminal(self):
+        self.assertEqual(rift.terminal_recipe("ghostty", "/p", ["btop"]), ["ghostty", "--working-directory=/p", "--wait-after-command=true", "-e", "btop"])
+        self.assertEqual(rift.terminal_recipe("alacritty", "/p", ["btop"]), ["alacritty", "--working-directory", "/p", "--hold", "-e", "btop"])
+        self.assertEqual(rift.terminal_recipe("kitty", "/p", ["btop"]), ["kitty", "--directory", "/p", "--hold", "btop"])
+        self.assertEqual(rift.terminal_recipe("wezterm", "/p", ["btop"]), ["wezterm", "start", "--cwd", "/p", "--", "btop"])
+        self.assertEqual(rift.terminal_recipe("foot", "", []), ["foot"])
+
+    def test_resolved_directory_args_uses_process_cwd_not_helper_cwd(self):
+        project = Path(self.temp.name) / "the-project"
+        project.mkdir()
+        self.assertEqual(
+            rift.resolved_directory_args(["code", "."], str(project)),
+            [str(project.resolve())],
+        )
+        self.assertEqual(
+            rift.resolved_directory_args(["code", "--new-window", str(project)], "/unrelated"),
+            [str(project.resolve())],
+        )
+        self.assertEqual(rift.resolved_directory_args(["code", "."], ""), [])
+
+    def test_gui_editor_keeps_project_folder_from_relative_argv(self):
+        project = Path(self.temp.name) / "the-project"
+        project.mkdir()
+        client = {"class": "Code", "initialClass": "Code", "pid": 9, "title": "rift"}
+        entries = [{"id": "code", "name": "Code", "startup_class": "Code", "exec": "code"}]
+        with patch.object(
+            rift,
+            "process_info",
+            return_value=("/usr/bin/code", ["code", "."], str(project)),
+        ):
+            app = rift.app_from_client(client, entries)
+        self.assertIsNotNone(app)
+        self.assertEqual(app["launch"], ["/usr/bin/code", str(project.resolve())])
+        self.assertIn(str(project.resolve()), app["id"])
 
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(
@@ -354,6 +564,27 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(rift.desktop_exec_binary("env --split-string editor --flag"), "")
         self.assertEqual(rift.desktop_exec_binary("%F"), "")
 
+    def test_launch_fails_when_recorded_cwd_is_gone(self):
+        app = {
+            "id": "terminal:kitty:/gone:claude",
+            "launch": ["kitty", "--directory", "/gone", "--hold", "claude", "--continue"],
+            "cwd": "/definitely-not-a-rift-directory-xyz",
+        }
+        with patch.object(rift.subprocess, "Popen") as popen:
+            result = rift.launch_app_result(app, {"name": "Nova", "slug": "nova"})
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("no longer exists", result["error"])
+        popen.assert_not_called()
+
+    def test_launch_without_recorded_cwd_still_uses_home(self):
+        with patch.object(rift.subprocess, "Popen") as popen:
+            result = rift.launch_app_result(
+                {"id": "desktop:code", "launch": ["gtk-launch", "code"]},
+                {"name": "Nova", "slug": "nova"},
+            )
+        self.assertEqual(result["status"], "launched")
+        self.assertEqual(popen.call_args.kwargs["cwd"], str(Path.home()))
+
     def test_unlaunchable_app_does_not_abort_rift(self):
         broken = {"launch": ["missing-app"], "cwd": "", "policy": "launch"}
         working = {"launch": ["working-app"], "cwd": "", "policy": "launch"}
@@ -368,6 +599,49 @@ class RiftHelperTests(unittest.TestCase):
 
         self.assertEqual(launched, [False, True])
         self.assertEqual(popen.call_count, 2)
+
+    def test_ensure_app_does_not_launch_when_client_state_is_unknown(self):
+        app = {
+            "id": "desktop:slack",
+            "class": "Slack",
+            "policy": "ensure",
+            "launch": ["gtk-launch", "slack"],
+        }
+        with patch.object(rift, "hypr_json", side_effect=RuntimeError("Hyprland busy")), patch.object(
+            rift.subprocess, "Popen"
+        ) as popen:
+            result = rift.launch_app_result(app, {"name": "Work", "slug": "work"})
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["reason"], "state-unknown")
+        popen.assert_not_called()
+
+    def test_ensure_app_launches_only_after_confirmed_absence(self):
+        app = {
+            "id": "desktop:slack",
+            "class": "Slack",
+            "policy": "ensure",
+            "launch": ["gtk-launch", "slack"],
+        }
+        with patch.object(rift, "hypr_json", return_value=[]), patch.object(rift.subprocess, "Popen") as popen:
+            result = rift.launch_app_result(app, {"name": "Work", "slug": "work"})
+        self.assertEqual(result["status"], "launched")
+        popen.assert_called_once()
+
+    def test_ensure_app_reports_existing_client_without_launching(self):
+        app = {
+            "id": "desktop:slack",
+            "class": "Slack",
+            "policy": "ensure",
+            "launch": ["gtk-launch", "slack"],
+        }
+        clients = [{"class": "slack", "initialClass": "Slack"}]
+        with patch.object(rift, "hypr_json", return_value=clients), patch.object(
+            rift.subprocess, "Popen"
+        ) as popen:
+            result = rift.launch_app_result(app, {"name": "Work", "slug": "work"})
+        self.assertEqual(result["status"], "already-running")
+        popen.assert_not_called()
 
     def test_open_rift_keeps_total_failure_retryable(self):
         saved = {"slug": "nova", "name": "Nova", "apps": [{"id": "missing"}]}
@@ -437,6 +711,43 @@ class RiftHelperTests(unittest.TestCase):
         dispatch.assert_called_once_with("workspace", "9")
         launch.assert_called_once_with(saved["apps"][1], saved)
         self.assertNotIn("failed_apps", runtime["open"]["nova"])
+
+    def test_open_rift_does_not_hold_runtime_lock_while_launching(self):
+        rift.ensure_dirs()
+        rift.atomic_json(
+            rift.rift_path("nova"),
+            {
+                "schemaVersion": 1,
+                "slug": "nova",
+                "name": "Nova",
+                "apps": [{"id": "editor", "launch": ["editor"]}],
+            },
+        )
+        entered = threading.Event()
+
+        def launch(_app, _saved):
+            def other():
+                with rift.runtime_transaction() as runtime:
+                    runtime["probe"] = True
+                entered.set()
+
+            worker = threading.Thread(target=other, daemon=True)
+            worker.start()
+            self.assertTrue(entered.wait(1.5), "runtime lock was still held while launching apps")
+            worker.join(timeout=1)
+            return {"app": "editor", "status": "launched"}
+
+        with patch.object(rift, "hypr_dispatch"), patch.object(
+            rift, "current_workspace", return_value={"id": 2, "name": "2"}
+        ), patch.object(
+            rift, "wait_for_workspace_change", return_value={"id": 9, "name": "9"}
+        ), patch.object(
+            rift, "hypr_json", return_value=[{"id": 9, "windows": 1}]
+        ), patch.object(rift, "launch_app_result", side_effect=launch):
+            result = rift.open_rift("nova")
+
+        self.assertEqual(result["action"], "opened")
+        self.assertEqual(rift.runtime_state()["open"]["nova"]["workspace_id"], 9)
 
     def test_partial_startup_does_not_write_completion_marker(self):
         rift.ensure_dirs()

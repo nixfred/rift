@@ -29,6 +29,7 @@ CONFIG_ROOT = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) /
 RIFTS_ROOT = CONFIG_ROOT / "rifts"
 STATE_ROOT = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "rift"
 RUNTIME_FILE = STATE_ROOT / "runtime.json"
+SETTINGS_FILE = CONFIG_ROOT / "settings.json"
 
 IGNORED_CLASSES = {
     "omarchy-shell",
@@ -179,6 +180,139 @@ def process_info(pid: int) -> tuple[str, list[str], str]:
     return executable, argv, cwd
 
 
+# ---------------------------------------------------------------------------
+# Deep terminal capture: what is really going on inside that terminal window?
+# Hyprland gives us the terminal's pid. Its cwd is where the terminal was
+# *started* (usually $HOME) — useless. The shell underneath knows the real
+# directory, and the program in the foreground (claude, codex, nvim, btop…)
+# is what the user actually wants back.
+# ---------------------------------------------------------------------------
+
+SHELLS = {"bash", "zsh", "fish", "sh", "dash", "nu", "nushell", "elvish", "xonsh", "tcsh", "ksh"}
+TERMINAL_HELPERS = {"kitten", "ghostty", "alacritty", "foot", "wezterm-gui", "wezterm", "kitty"}
+# Programs that know how to pick their own session back up. The recipe we
+# replay is argv with the resume flag appended, so Fred's wrapper flags survive.
+RESUMABLE = {"claude", "codex"}
+# Plain TUI programs that are safe and useful to relaunch exactly as seen.
+REPLAYABLE = {
+    "nvim", "vim", "vi", "hx", "helix", "nano", "micro", "emacs",
+    "btop", "htop", "top", "lazygit", "lazydocker", "tmux", "zellij",
+    "yazi", "ranger", "nnn", "lf", "ssh", "mosh", "tail", "journalctl", "watch",
+}
+# GUI apps whose argv carries the project folder we want to keep (gtk-launch would lose it).
+GUI_ARGV_APPS = {"code", "code-oss", "codium", "cursor", "zed", "zeditor", "windsurf"}
+
+
+def child_pids(pid: int) -> list[int]:
+    try:
+        text = (Path("/proc") / str(pid) / "task" / str(pid) / "children").read_text()
+        return [int(part) for part in text.split()]
+    except (OSError, ValueError):
+        pass
+    result = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat_text = (entry / "stat").read_text()
+            parent = int(stat_text.rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        if parent == pid:
+            result.append(int(entry.name))
+    return result
+
+
+def proc_comm(pid: int) -> str:
+    try:
+        return (Path("/proc") / str(pid) / "comm").read_text().strip()
+    except OSError:
+        return ""
+
+
+def proc_ids(pid: int) -> tuple[int, int, int] | None:
+    """Return (ppid, pgrp, tpgid) from /proc/<pid>/stat, or None."""
+    try:
+        text = (Path("/proc") / str(pid) / "stat").read_text()
+        rest = text.rsplit(")", 1)[1].split()
+        return int(rest[1]), int(rest[2]), int(rest[5])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def capture_program(pid: int, fallback_cwd: str) -> dict[str, Any] | None:
+    _executable, argv, cwd = process_info(pid)
+    comm = proc_comm(pid)
+    if not argv or comm in SHELLS or comm in TERMINAL_HELPERS:
+        return None
+    program = Path(argv[0]).name
+    if program in SHELLS or program in TERMINAL_HELPERS:
+        return None
+    return {"command": argv, "program": program, "cwd": cwd or fallback_cwd}
+
+
+def terminal_session(pid: int) -> dict[str, Any]:
+    """Find the shell under a terminal pid and whatever runs in its foreground.
+
+    The foreground program is the process group named by the shell's (or the
+    terminal's) tpgid — not "whatever child /proc listed last". Background
+    jobs are children too; using list order captured `sleep 100 &` instead of
+    the Claude session in front of it. Direct `kitty -e claude` has no shell;
+    tpgid on the terminal pid still finds claude.
+
+    Returns {"cwd": shell cwd, "command": argv or [], "program": basename or ""}.
+    """
+    session: dict[str, Any] = {"cwd": "", "command": [], "program": ""}
+    queue = [pid]
+    seen: set[int] = set()
+    shell_pid = 0
+    # Breadth-first through helpers (kitten etc.) until we hit a real shell.
+    while queue and not shell_pid:
+        current = queue.pop(0)
+        for child in child_pids(current):
+            if child in seen:
+                continue
+            seen.add(child)
+            comm = proc_comm(child)
+            if comm in SHELLS:
+                shell_pid = child
+                break
+            if comm in TERMINAL_HELPERS or not comm:
+                queue.append(child)
+    target = shell_pid or pid
+    _exe, _argv, target_cwd = process_info(target)
+    session["cwd"] = target_cwd
+    ids = proc_ids(target)
+    if not ids:
+        return session
+    _ppid, _pgrp, tpgid = ids
+    if tpgid <= 0 or tpgid == target:
+        return session
+    captured = capture_program(tpgid, target_cwd)
+    if captured:
+        session.update(captured)
+    return session
+
+
+def resume_command(session: dict[str, Any]) -> list[str]:
+    """Turn a captured foreground program into something worth replaying, or []."""
+    argv = list(session.get("command") or [])
+    program = str(session.get("program") or "")
+    if not argv or not program:
+        return []
+    if program == "claude":
+        # --continue picks up the most recent conversation in this directory,
+        # so a Claude Code session really does come back as that session.
+        if not any(flag in argv for flag in ("--continue", "-c", "--resume", "-r")):
+            argv = argv + ["--continue"]
+        return argv
+    if program == "codex":
+        return ["codex", "resume", "--last"]
+    if program in REPLAYABLE:
+        return argv
+    return []
+
+
 def desktop_exec_binary(exec_line: str) -> str:
     """Return the executable token from a Desktop Entry Exec value."""
     try:
@@ -258,18 +392,50 @@ def find_desktop_entry(classes: list[str], executable: str, entries: list[dict[s
     return None
 
 
-def terminal_recipe(binary: str, cwd: str) -> list[str]:
+def resolved_directory_args(argv: list[str], process_cwd: str) -> list[str]:
+    """Absolute directories from argv, with relative paths resolved against the process cwd.
+
+    `Path('.').is_dir()` is always true for the *helper's* cwd, so `code .`
+    would otherwise reopen the plugin directory instead of the project.
+    """
+    folders: list[str] = []
+    for arg in argv[1:]:
+        if not arg or arg.startswith("-"):
+            continue
+        path = Path(arg)
+        if not path.is_absolute():
+            if not process_cwd:
+                continue
+            path = Path(process_cwd) / arg
+        try:
+            if path.is_dir():
+                folders.append(str(path.resolve()))
+        except OSError:
+            continue
+    return folders
+
+
+def terminal_recipe(binary: str, cwd: str, command: list[str] | None = None) -> list[str]:
+    """Launch a terminal in cwd, optionally running command inside it."""
+    # --hold & friends: when the program exits you get a shell prompt instead
+    # of the window vanishing (claude /exit should not take the terminal with it).
+    command = list(command or [])
     if binary == "ghostty":
-        return [binary, f"--working-directory={cwd}"] if cwd else [binary]
+        recipe = [binary, f"--working-directory={cwd}"] if cwd else [binary]
+        return recipe + ["--wait-after-command=true", "-e", *command] if command else recipe
     if binary == "kitty":
-        return [binary, "--directory", cwd] if cwd else [binary]
+        recipe = [binary, "--directory", cwd] if cwd else [binary]
+        return recipe + ["--hold", *command] if command else recipe
     if binary == "alacritty":
-        return [binary, "--working-directory", cwd] if cwd else [binary]
+        recipe = [binary, "--working-directory", cwd] if cwd else [binary]
+        return recipe + ["--hold", "-e", *command] if command else recipe
     if binary == "foot":
-        return [binary, "--working-directory", cwd] if cwd else [binary]
+        recipe = [binary, "--working-directory", cwd] if cwd else [binary]
+        return recipe + ["--hold", *command] if command else recipe
     if binary == "wezterm":
-        return [binary, "start", "--cwd", cwd] if cwd else [binary]
-    return [binary]
+        recipe = [binary, "start", "--cwd", cwd] if cwd else [binary, "start"]
+        return recipe + ["--", *command] if command else recipe
+    return [binary] + command
 
 
 def app_from_client(client: dict[str, Any], entries: list[dict[str, str]]) -> dict[str, Any] | None:
@@ -282,18 +448,31 @@ def app_from_client(client: dict[str, Any], entries: list[dict[str, str]]) -> di
         return None
 
     pid = int(client.get("pid") or 0)
-    executable, _argv, cwd = process_info(pid)
+    executable, argv, cwd = process_info(pid)
     terminal = next((TERMINALS[value] for value in lower_classes if value in TERMINALS), "")
     desktop = find_desktop_entry([app_class, initial_class], executable, entries)
+    command: list[str] = []
+    program = ""
 
     if terminal and shutil.which(terminal):
-        launch = terminal_recipe(terminal, cwd)
-        app_id = f"terminal:{terminal}:{cwd or 'home'}"
-        name = terminal.title()
+        session = terminal_session(pid)
+        cwd = session.get("cwd") or cwd
+        program = str(session.get("program") or "")
+        command = resume_command(session)
+        launch = terminal_recipe(terminal, cwd, command)
+        app_id = f"terminal:{terminal}:{cwd or 'home'}" + (f":{program}" if program else "")
+        name = terminal.title() + (f" · {program}" if program else "")
         kind = "terminal"
     elif desktop:
-        launch = ["gtk-launch", desktop["id"]]
-        app_id = f"desktop:{desktop['id']}"
+        exe_name = Path(executable).name if executable else ""
+        folder_args = resolved_directory_args(argv, cwd)
+        if exe_name in GUI_ARGV_APPS and folder_args:
+            # Keep the project folder the editor was opened on.
+            launch = [executable, *folder_args]
+            app_id = f"desktop:{desktop['id']}:{folder_args[0]}"
+        else:
+            launch = ["gtk-launch", desktop["id"]]
+            app_id = f"desktop:{desktop['id']}"
         name = desktop["name"]
         kind = "application"
     elif executable and os.access(executable, os.X_OK):
@@ -314,6 +493,9 @@ def app_from_client(client: dict[str, Any], entries: list[dict[str, str]]) -> di
         "launch": launch,
         "policy": "ensure" if global_app else "launch",
         "selected": not global_app,
+        "program": program,
+        "command": command,
+        "title": str(client.get("title") or ""),
     }
 
 
@@ -418,10 +600,14 @@ def normalized_runtime_state(value: Any, signature: str) -> dict[str, Any]:
             continue
         if workspace_id <= 0:
             continue
-        valid[slug] = {
+        normalized = {
             "workspace_id": workspace_id,
             "workspace_name": str(association.get("workspace_name", "")),
         }
+        failed_apps = association.get("failed_apps")
+        if isinstance(failed_apps, list):
+            normalized["failed_apps"] = [item for item in failed_apps if isinstance(item, str) and item]
+        valid[slug] = normalized
     return {"signature": signature, "open": valid}
 
 
@@ -461,6 +647,50 @@ def runtime_transaction() -> Iterator[dict[str, Any]]:
         save_runtime(state)
 
 
+def load_settings() -> dict[str, Any]:
+    value = read_json(SETTINGS_FILE, {})
+    return value if isinstance(value, dict) else {}
+
+
+def save_settings(settings: dict[str, Any]) -> None:
+    atomic_json(SETTINGS_FILE, settings)
+
+
+def help_enabled(settings: dict[str, Any] | None = None, rifts: list[dict[str, Any]] | None = None) -> bool:
+    """Help mode is on for brand-new users until they save their first Rift, or
+    whenever they switch it on themselves."""
+    settings = load_settings() if settings is None else settings
+    explicit = settings.get("help")
+    if isinstance(explicit, bool):
+        return explicit
+    return not bool(settings.get("everSaved")) and not (rifts if rifts is not None else load_rifts())
+
+
+def set_help(enabled: bool) -> dict[str, Any]:
+    settings = load_settings()
+    settings["help"] = enabled
+    save_settings(settings)
+    return {"help": enabled}
+
+
+def rename_rift(slug: str, new_name: str) -> dict[str, Any]:
+    rift = load_rift(slug)
+    new_slug = slugify(new_name)
+    if new_slug != rift["slug"] and rift_path(new_slug).exists():
+        raise ValueError(f"A Rift named {new_name.strip()} already exists")
+    old_slug = rift["slug"]
+    rift["name"] = new_name.strip()
+    rift["slug"] = new_slug
+    persist_rift(rift)
+    if new_slug != old_slug:
+        rift_path(old_slug).unlink(missing_ok=True)
+        with runtime_transaction() as runtime:
+            association = runtime.get("open", {}).pop(old_slug, None)
+            if association:
+                runtime["open"][new_slug] = association
+    return rift
+
+
 def state_payload() -> dict[str, Any]:
     workspace = current_workspace()
     apps = current_apps(workspace)
@@ -474,12 +704,20 @@ def state_payload() -> dict[str, Any]:
     current_saved = next((item for item in rifts if item.get("slug") == current_slug), None)
     saved_ids = {app.get("id") for app in (current_saved or {}).get("apps", [])}
     current_ids = {app.get("id") for app in apps if app.get("selected", True)}
+    settings = load_settings()
+    # Tell the panel where every open Rift lives so the entry view can say
+    # "on workspace 7" and only offer Update when you are standing there.
+    open_map = {slug: int(item.get("workspace_id", 0)) for slug, item in runtime.get("open", {}).items()}
+    for rift in rifts:
+        rift["openWorkspace"] = open_map.get(rift.get("slug"), 0)
     return {
         "workspace": {"id": workspace.get("id", 0), "name": workspace.get("name", "")},
         "apps": apps,
         "rifts": rifts,
         "currentRift": current_slug,
         "changed": bool(current_slug and current_saved and saved_ids != current_ids),
+        "help": help_enabled(settings, rifts),
+        "everSaved": bool(settings.get("everSaved")),
     }
 
 
@@ -508,6 +746,11 @@ def save_rift(
                 f"{name} belongs to {where}, not workspace {workspace_id}. "
                 "Save this workspace as a new Rift instead."
             )
+    if rift_path(slug).exists() and (update_of is None or slugify(update_of) != slug):
+        raise RuntimeError(
+            f"A Rift named {name.strip()} already exists. "
+            "Update it from its own workspace, or choose a different name."
+        )
     apps = current_apps(workspace)
     if include_ids is None:
         apps = [app for app in apps if app.get("selected", True)]
@@ -517,6 +760,8 @@ def save_rift(
     focused = current_workspace()
     if int(focused.get("id", 0)) != workspace_id:
         raise RuntimeError("Workspace changed while saving; try again")
+    if not apps:
+        raise ValueError("Open at least one application before saving this Rift")
     existing = read_json(rift_path(slug), {})
     value = {
         "schemaVersion": 1,
@@ -538,6 +783,10 @@ def save_rift(
         value["history"] = history
         value["previous"] = history[0]
     atomic_json(rift_path(slug), value)
+    settings = load_settings()
+    if not settings.get("everSaved"):
+        settings["everSaved"] = True  # help mode retires itself after the first real Rift
+        save_settings(settings)
     with runtime_transaction() as runtime:
         runtime["open"] = {
             open_slug: association
@@ -551,28 +800,50 @@ def save_rift(
     return value
 
 
-def app_is_running(app: dict[str, Any]) -> bool:
+def app_running_state(app: dict[str, Any]) -> str:
     wanted = str(app.get("class", "")).casefold()
     if not wanted:
-        return False
+        return "absent"
     try:
-        return any(
+        running = any(
             wanted in {str(client.get("class", "")).casefold(), str(client.get("initialClass", "")).casefold()}
             for client in hypr_json("clients")
         )
     except Exception:
-        return False
+        return "unknown"
+    return "present" if running else "absent"
+
+
+def app_is_running(app: dict[str, Any]) -> bool:
+    return app_running_state(app) == "present"
 
 
 def launch_app_result(app: dict[str, Any], rift: dict[str, Any]) -> dict[str, str]:
     identity = str(app.get("id") or app.get("name") or "unknown")
-    if app.get("policy") == "ensure" and app_is_running(app):
-        return {"app": identity, "status": "already-running"}
+    if app.get("policy") == "ensure":
+        running_state = app_running_state(app)
+        if running_state == "present":
+            return {"app": identity, "status": "already-running"}
+        if running_state == "unknown":
+            return {
+                "app": identity,
+                "status": "failed",
+                "reason": "state-unknown",
+                "error": "Could not verify whether this application is already running",
+            }
     argv = app.get("launch") or []
     if not isinstance(argv, list) or not argv:
         return {"app": identity, "status": "failed", "error": "Invalid launch recipe"}
-    cwd = str(app.get("cwd") or "")
-    if not cwd or not Path(cwd).is_dir():
+    recorded = str(app.get("cwd") or "")
+    if recorded:
+        if not Path(recorded).is_dir():
+            return {
+                "app": identity,
+                "status": "failed",
+                "error": f"Working directory no longer exists: {recorded}",
+            }
+        cwd = recorded
+    else:
         cwd = str(Path.home())
     env = os.environ.copy()
     env["RIFT_NAME"] = str(rift.get("name", ""))
@@ -609,54 +880,58 @@ def wait_for_workspace_change(previous_id: int, timeout: float = 2.0) -> dict[st
 
 def open_rift(slug: str) -> dict[str, Any]:
     rift = load_rift(slug)
-    with runtime_transaction() as runtime:
-        association = runtime.get("open", {}).get(rift["slug"])
-        if association:
-            hypr_dispatch("workspace", str(association["workspace_id"]))
-            pending = set(association.get("failed_apps", []))
-            if pending:
-                retry_apps = [app for app in rift.get("apps", []) if str(app.get("id", "")) in pending]
-                results = [launch_app_result(app, rift) for app in retry_apps]
-                remaining = [result["app"] for result in results if result["status"] == "failed"]
-                if remaining:
-                    association["failed_apps"] = remaining
-                else:
-                    association.pop("failed_apps", None)
-                launched = sum(result["status"] == "launched" for result in results)
-                return {
-                    "action": "partial" if remaining else "opened",
-                    "rift": rift["slug"],
-                    "workspace": association["workspace_id"],
-                    "launched": launched,
-                    "failed": len(remaining),
-                    "results": results,
-                }
-            return {"action": "focused", "rift": rift["slug"], "workspace": association["workspace_id"]}
-
-        previous_id = int(current_workspace().get("id", 0))
-        hypr_dispatch("workspace", "emptyn")
-        workspace = wait_for_workspace_change(previous_id)
-        workspace_id = int(workspace.get("id", 0))
-        apps = rift.get("apps", [])
-        results = [launch_app_result(app, rift) for app in apps]
-        launched = sum(result["status"] == "launched" for result in results)
-        satisfied = sum(result["status"] in {"launched", "already-running"} for result in results)
-        failed = len(results) - satisfied
-        if apps and satisfied == 0:
+    runtime = runtime_state()
+    association = (runtime.get("open") or {}).get(rift["slug"])
+    if association:
+        hypr_dispatch("workspace", str(association["workspace_id"]))
+        pending = set(association.get("failed_apps", []))
+        if pending:
+            retry_apps = [app for app in rift.get("apps", []) if str(app.get("id", "")) in pending]
+            results = [launch_app_result(app, rift) for app in retry_apps]
+            remaining = [result["app"] for result in results if result["status"] == "failed"]
+            launched = sum(result["status"] == "launched" for result in results)
+            with runtime_transaction() as locked:
+                current = (locked.get("open") or {}).get(rift["slug"])
+                if current is not None:
+                    if remaining:
+                        current["failed_apps"] = remaining
+                    else:
+                        current.pop("failed_apps", None)
             return {
-                "action": "failed",
+                "action": "partial" if remaining else "opened",
                 "rift": rift["slug"],
-                "workspace": workspace_id,
-                "launched": 0,
-                "failed": failed,
+                "workspace": association["workspace_id"],
+                "launched": launched,
+                "failed": len(remaining),
                 "results": results,
             }
-        runtime.setdefault("open", {})[rift["slug"]] = {
+        return {"action": "focused", "rift": rift["slug"], "workspace": association["workspace_id"]}
+
+    previous_id = int(current_workspace().get("id", 0))
+    hypr_dispatch("workspace", "emptyn")
+    workspace = wait_for_workspace_change(previous_id)
+    workspace_id = int(workspace.get("id", 0))
+    apps = rift.get("apps", [])
+    results = [launch_app_result(app, rift) for app in apps]
+    launched = sum(result["status"] == "launched" for result in results)
+    satisfied = sum(result["status"] in {"launched", "already-running"} for result in results)
+    failed = len(results) - satisfied
+    if apps and satisfied == 0:
+        return {
+            "action": "failed",
+            "rift": rift["slug"],
+            "workspace": workspace_id,
+            "launched": 0,
+            "failed": failed,
+            "results": results,
+        }
+    with runtime_transaction() as locked:
+        locked.setdefault("open", {})[rift["slug"]] = {
             "workspace_id": workspace_id,
             "workspace_name": str(workspace.get("name", "")),
         }
         if failed:
-            runtime["open"][rift["slug"]]["failed_apps"] = [
+            locked["open"][rift["slug"]]["failed_apps"] = [
                 result["app"] for result in results if result["status"] == "failed"
             ]
     return {
@@ -679,7 +954,7 @@ def new_workspace() -> dict[str, Any]:
 
 def persist_rift(rift: dict[str, Any]) -> dict[str, Any]:
     """Write a Rift definition, dropping derived fields that must not be stored."""
-    stored = {key: value for key, value in rift.items() if key != "validationErrors"}
+    stored = {key: value for key, value in rift.items() if key not in ("validationErrors", "openWorkspace")}
     atomic_json(rift_path(stored["slug"]), stored)
     return rift
 
@@ -766,6 +1041,11 @@ def parser() -> argparse.ArgumentParser:
     delete.add_argument("slug")
     revert = sub.add_parser("revert")
     revert.add_argument("slug")
+    rename = sub.add_parser("rename")
+    rename.add_argument("slug")
+    rename.add_argument("name")
+    help_command = sub.add_parser("help")
+    help_command.add_argument("enabled", choices=["on", "off"])
     sub.add_parser("new-workspace")
     sub.add_parser("startup-open")
     return result
@@ -785,6 +1065,10 @@ def main() -> int:
             emit(set_startup(args.slug, args.enabled == "on"))
         elif args.command == "revert":
             emit(revert_rift(args.slug))
+        elif args.command == "rename":
+            emit(rename_rift(args.slug, args.name))
+        elif args.command == "help":
+            emit(set_help(args.enabled == "on"))
         elif args.command == "delete":
             delete_rift(args.slug)
             emit({"deleted": args.slug})

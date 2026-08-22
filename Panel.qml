@@ -11,12 +11,14 @@ Panel {
   ipcTarget: "nixfred.rift"
   manageIpc: false
 
-  readonly property string riftVersion: "0.2.1"  // keep in lockstep with manifest.json (tests enforce)
+  readonly property string riftVersion: "0.3.1"  // keep in lockstep with manifest.json (tests enforce)
   property var anchorItem: null
   property var hostWidget: null
   property string helperPath: ""
   property var stateData: ({ workspace: { id: 0, name: "" }, apps: [], rifts: [], currentRift: "", changed: false })
-  property string mode: "browse"
+  property string mode: "browse"          // browse | new | detail | save
+  property string detailSlug: ""
+  property bool confirmDelete: false
   property int selectedIndex: 0
   property var includedApps: ({})
   property string statusText: ""
@@ -48,6 +50,15 @@ Panel {
       if (rifts[i].slug === stateData.currentRift) return rifts[i]
     return null
   }
+  readonly property var detailRift: {
+    for (var i = 0; i < rifts.length; i++)
+      if (rifts[i].slug === detailSlug) return rifts[i]
+    return null
+  }
+  readonly property bool helpOn: stateData.help === true
+  // Update is only offered from inside an entry, and only when that Rift is
+  // the one open on the workspace you are standing on right now.
+  readonly property bool detailIsHere: detailRift !== null && detailRift.openWorkspace === liveWorkspaceId && liveWorkspaceId > 0
 
   function helperCommand(args) {
     var command = ["python3", helperPath]
@@ -94,6 +105,7 @@ Panel {
   function close() {
     controller.hide()
     mode = "browse"
+    confirmDelete = false
   }
 
   function toggle() { opened ? close() : open() }
@@ -152,43 +164,94 @@ Panel {
       refresh()
       return
     }
+    if (selectedAppIds().length === 0) {
+      errorText = noAppsError
+      return
+    }
     runAction("save", ["save", name, "--apps", selectedAppIds().join("\x1f"),
                        "--expect-workspace", String(stateData.workspace.id)])
   }
 
   function openRift(slug) { runAction("open", ["open", slug]) }
 
-  function beginNewRift() { beginSave("") }
-
-  function headerAction() {
-    if (!canWrite) return
-    if (currentRift) updateCurrent()
-    else beginNewRift()
+  // ＋ always opens the New Rift chooser: save what is here, or start fresh.
+  function beginNew() {
+    if (mode === "new") { backToBrowse(); return }
+    confirmDelete = false
+    errorText = ""
+    mode = "new"
   }
 
-  function revertCurrent() {
-    if (currentRift && currentRift.previous && canWrite) runAction("revert", ["revert", currentRift.slug])
+  function createFreshWorkspace() {
+    if (actionProcess.running) return
+    runAction("new", ["new-workspace"])
   }
+
+  function openDetail(slug) {
+    detailSlug = slug
+    confirmDelete = false
+    errorText = ""
+    mode = "detail"
+  }
+
+  function backToBrowse() {
+    mode = "browse"
+    confirmDelete = false
+    errorText = ""
+  }
+
+  function updateRift(rift) {
+    if (!rift || !canWrite || rift.openWorkspace !== liveWorkspaceId) return
+    runAction("update", ["save", rift.name,
+                         "--expect-workspace", String(stateData.workspace.id),
+                         "--update-of", rift.slug])
+  }
+
+  function revertRift(rift) {
+    if (rift && rift.previous && canWrite) runAction("revert", ["revert", rift.slug])
+  }
+
+  function deleteRift(rift) {
+    if (!rift || actionProcess.running) return
+    if (!confirmDelete) { confirmDelete = true; return }
+    runAction("delete", ["delete", rift.slug])
+  }
+
+  function toggleHelp() { runAction("help", ["help", helpOn ? "off" : "on"]) }
 
   function toggleStartup(rift) {
     runAction("startup", ["startup", rift.slug, rift.startup ? "off" : "on"])
   }
 
-  // One-click: re-record whatever is on this workspace under the current Rift's name.
-  function updateCurrent() {
-    if (!currentRift || !canWrite) return
-    runAction("update", ["save", currentRift.name,
-                         "--expect-workspace", String(stateData.workspace.id),
-                         "--update-of", currentRift.slug])
-  }
+
 
   function moveSelection(delta) {
     if (mode !== "browse" || rifts.length === 0) return
     selectedIndex = Math.max(0, Math.min(rifts.length - 1, selectedIndex + delta))
+    Qt.callLater(ensureSelectionVisible)
+  }
+
+  function ensureSelectionVisible() {
+    const item = riftRepeater.itemAt(selectedIndex)
+    if (!item) return
+
+    const top = item.mapToItem(contentColumn, 0, 0).y
+    const bottom = top + item.height
+    if (top < scroll.contentY)
+      scroll.contentY = top
+    else if (bottom > scroll.contentY + scroll.height)
+      scroll.contentY = Math.max(0, Math.min(scroll.contentHeight - scroll.height, bottom - scroll.height))
+  }
+
+  function switchPanel(direction) {
+    if (bar && barIdentity && typeof bar.switchPanelFrom === "function")
+      return bar.switchPanelFrom(barIdentity, direction)
+    return false
   }
 
   function activateSelection() {
-    if (mode === "browse" && rifts.length > 0) openRift(rifts[selectedIndex].slug)
+    if (mode === "browse" && rifts.length > 0) openDetail(rifts[selectedIndex].slug)
+    else if (mode === "detail" && detailRift) openRift(detailRift.slug)
   }
 
   Process {
@@ -249,14 +312,23 @@ Panel {
             root.notify("Rift opened", response.data.launched + " application" + (response.data.launched === 1 ? " is" : "s are") + " launching on workspace " + response.data.workspace + ".")
             root.close()
           }
-        } else if (root.pendingAction === "update") {
+        } else if (root.pendingAction === "new") {
+          root.notify("Fresh workspace " + response.data.workspace.id, "Open what belongs here, then click 󰦛 and save it as a Rift.")
+          root.close()
+        } else if (root.pendingAction === "delete") {
           root.mode = "browse"
+          root.confirmDelete = false
+          root.statusText = "Deleted " + response.data.deleted
+          root.refresh()
+        } else if (root.pendingAction === "update") {
           root.statusText = "Updated " + response.data.name + " · " + response.data.apps.length + " application" + (response.data.apps.length === 1 ? "" : "s")
           root.notify("Rift updated", response.data.name + " now has " + response.data.apps.length + " application" + (response.data.apps.length === 1 ? "" : "s"))
           root.refresh()
         } else if (root.pendingAction === "revert") {
           root.statusText = "Reverted " + response.data.name + " to its previous recipe"
           root.notify("Rift reverted", response.data.name)
+          root.refresh()
+        } else if (root.pendingAction === "help") {
           root.refresh()
         } else if (root.pendingAction === "save") {
           root.mode = "browse"
@@ -290,14 +362,26 @@ Panel {
       blocked: root.mode === "save"
       onMoveRequested: function(dx, dy) { if (dy !== 0) root.moveSelection(dy) }
       onActivateRequested: root.activateSelection()
-      onCloseRequested: root.close()
+      onCloseRequested: { if (root.mode === "detail" || root.mode === "new") root.backToBrowse(); else root.close() }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(text) {
-        if (!root.canWrite) return
-        if (text === "n" || text === "N") root.beginNewRift()
-        else if (text === "s" || text === "S") root.beginSave(root.currentRift ? root.currentRift.name : "")
-        else if ((text === "u" || text === "U") && root.currentRift) root.updateCurrent()
-        else if ((text === "r" || text === "R") && root.currentRift && root.currentRift.previous) root.revertCurrent()
+        var key = String(text).toLowerCase()
+        if (key === "h") { root.toggleHelp(); return }
+        if (key === "n") { root.beginNew(); return }
+        if (root.mode === "browse") {
+          if (key === "s" && !root.currentRift && root.canWrite) root.beginSave("")
+        } else if (root.mode === "new") {
+          if (key === "s" && root.canWrite && root.apps.length > 0) root.beginSave("")
+          else if (key === "f") root.createFreshWorkspace()
+          else if (key === "b") root.backToBrowse()
+        } else if (root.mode === "detail" && root.detailRift) {
+          if (key === "o") root.openRift(root.detailRift.slug)
+          else if (key === "u") root.updateRift(root.detailRift)
+          else if (key === "r") root.revertRift(root.detailRift)
+          else if (key === "l") root.toggleStartup(root.detailRift)
+          else if (key === "d") root.deleteRift(root.detailRift)
+          else if (key === "b") root.backToBrowse()
+        }
       }
 
       Flickable {
@@ -325,7 +409,7 @@ Panel {
             }
 
             Column {
-              width: parent.width - parent.children[0].width - freshButton.width - parent.spacing * 2
+              width: parent.width - parent.children[0].width - helpButton.width - freshButton.width - parent.spacing * 3
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(2)
 
@@ -361,16 +445,25 @@ Panel {
             }
 
             Button {
-              id: freshButton
-              iconText: root.currentRift ? "󰑐" : "＋"
-              tooltipText: root.currentRift
-                ? ("Update " + root.currentRift.name + " with this workspace · U")
-                : "Save this workspace as a new Rift · N"
+              id: helpButton
+              iconText: "󰋖"
+              tooltipText: root.helpOn ? "Turn help off · H" : "Turn help on · H"
               foreground: root.foreground
-              active: root.currentRift ? root.stateData.changed === true : false
+              active: root.helpOn
               focusable: true
-              enabled: root.canWrite
-              onClicked: root.headerAction()
+              enabled: !actionProcess.running
+              onClicked: root.toggleHelp()
+            }
+
+            Button {
+              id: freshButton
+              iconText: "＋"
+              tooltipText: "New Rift · N"
+              foreground: root.foreground
+              active: root.mode === "new"
+              focusable: true
+              enabled: !actionProcess.running
+              onClicked: root.beginNew()
             }
           }
 
@@ -386,52 +479,88 @@ Panel {
             width: parent.width
             spacing: Style.space(8)
 
-            Button {
+            // ---- Help walkthrough (new users; toggle with 󰋖 / H)
+            Rectangle {
+              visible: root.helpOn
               width: parent.width
-              text: root.currentRift
-                ? (root.stateData.changed ? "Update " + root.currentRift.name + " with this workspace" : root.currentRift.name + " is up to date")
-                : "Save this workspace as a Rift"
-              iconText: root.currentRift ? (root.stateData.changed ? "󰑐" : "󰄬") : "󰆓"
-              leftAlign: true
-              foreground: root.foreground
-              active: root.currentRift && !root.stateData.changed
-              focusable: true
-              enabled: root.canWrite
-              onClicked: {
-                if (root.currentRift && root.stateData.changed) root.updateCurrent()
-                else if (!root.currentRift) root.beginNewRift()
+              height: helpColumn.implicitHeight + Style.space(20)
+              radius: Style.space(8)
+              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.07)
+              border.color: root.dim
+              border.width: 1
+
+              Column {
+                id: helpColumn
+                anchors.fill: parent
+                anchors.margins: Style.space(10)
+                spacing: Style.space(4)
+
+                Text {
+                  text: "HOW RIFT WORKS"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  font.letterSpacing: 1.1
+                }
+                Repeater {
+                  model: [
+                    { n: "1", done: root.rifts.length > 0 || root.apps.length > 0, text: "Click ＋ (top right). Choose “start on a fresh workspace”." },
+                    { n: "2", done: root.rifts.length > 0 || root.apps.length > 0, text: "Open the apps that belong together there." },
+                    { n: "3", done: root.rifts.length > 0, text: "Click 󰦛 → “Save this workspace as a Rift” and name it." },
+                    { n: "4", done: false, text: "Click a Rift to open, update, revert, or delete it." },
+                    { n: "5", done: false, text: "Flip 󰐥 in the entry so it opens at login. 󰋖 hides this help." }
+                  ]
+                  Row {
+                    spacing: Style.space(8)
+                    width: helpColumn.width
+                    Text {
+                      text: modelData.done ? "󰄬" : modelData.n
+                      color: modelData.done ? root.foreground : root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      width: Style.space(14)
+                    }
+                    Text {
+                      width: parent.width - Style.space(22)
+                      text: modelData.text
+                      wrapMode: Text.WordWrap
+                      color: modelData.done ? root.dim : root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+                }
               }
             }
 
             Button {
-              visible: root.currentRift ? true : false
+              visible: !root.currentRift
               width: parent.width
-              text: "Save this workspace as a different Rift"
-              iconText: "＋"
+              text: root.apps.length > 0 ? "Save this workspace as a Rift" : "Open some apps here, then save this workspace as a Rift"
+              iconText: "󰆓"
               leftAlign: true
               foreground: root.foreground
               focusable: true
-              enabled: root.canWrite
-              tooltipText: "N"
-              onClicked: root.beginNewRift()
-            }
-
-            Button {
-              visible: root.currentRift && root.currentRift.previous ? true : false
-              width: parent.width
-              text: "Revert " + (root.currentRift ? root.currentRift.name : "") + " to its previous recipe"
-              iconText: "󰕌"
-              leftAlign: true
-              foreground: root.foreground
-              focusable: true
-              enabled: root.canWrite
-              onClicked: root.revertCurrent()
+              enabled: root.canWrite && root.apps.length > 0
+              tooltipText: "S"
+              onClicked: root.beginSave("")
             }
 
             Text {
-              visible: root.rifts.length === 0
+              visible: root.currentRift ? true : false
               width: parent.width
-              text: "No Rifts yet. Stand on a workspace, open what belongs there, and save it."
+              text: "You're on " + (root.currentRift ? root.currentRift.name : "") + (root.stateData.changed ? " — it has changed. Open its entry to update it." : ".")
+              wrapMode: Text.WordWrap
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              visible: root.rifts.length === 0 && !root.helpOn
+              width: parent.width
+              text: "No Rifts yet. Click ＋ for a fresh workspace, open what belongs there, then save it."
               wrapMode: Text.WordWrap
               color: root.dim
               font.family: root.fontFamily
@@ -439,6 +568,7 @@ Panel {
             }
 
             Repeater {
+              id: riftRepeater
               model: root.rifts
 
               CursorSurface {
@@ -455,7 +585,7 @@ Panel {
                   acceptedButtons: Qt.LeftButton
                   onClicked: {
                     root.selectedIndex = index
-                    root.openRift(modelData.slug)
+                    root.openDetail(modelData.slug)
                   }
                 }
 
@@ -491,6 +621,7 @@ Panel {
                     Text {
                       width: parent.width
                       text: modelData.apps.length + " application" + (modelData.apps.length === 1 ? "" : "s")
+                        + (modelData.openWorkspace > 0 ? " · on workspace " + modelData.openWorkspace : "")
                         + (modelData.startup ? " · opens at login" : "")
                       elide: Text.ElideRight
                       color: root.dim
@@ -503,7 +634,7 @@ Panel {
                     id: startupButton
                     anchors.verticalCenter: parent.verticalCenter
                     iconText: modelData.startup ? "󰐥" : "󰒲"
-                    tooltipText: modelData.startup ? "Disable startup" : "Open at login"
+                    tooltipText: (modelData.startup ? "Disable startup" : "Open at login") + " · L"
                     foreground: root.foreground
                     hoverColor: root.foreground
                     onClicked: root.toggleStartup(modelData)
@@ -515,12 +646,212 @@ Panel {
           }
 
           Column {
+            visible: root.mode === "new"
+            width: parent.width
+            spacing: Style.space(8)
+
+            Text {
+              text: "NEW RIFT"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              font.letterSpacing: 1.1
+            }
+
+            Button {
+              width: parent.width
+              text: root.apps.length > 0
+                ? "Save what's here (" + root.apps.length + " app" + (root.apps.length === 1 ? "" : "s") + ") as a new Rift"
+                : "Save what's here — nothing is open yet"
+              iconText: "󰆓"
+              leftAlign: true
+              foreground: root.foreground
+              focusable: true
+              enabled: root.canWrite && root.apps.length > 0
+              tooltipText: "S"
+              onClicked: root.beginSave("")
+            }
+
+            Button {
+              width: parent.width
+              text: "Start on a fresh, empty workspace"
+              iconText: "󰐊"
+              leftAlign: true
+              foreground: root.foreground
+              focusable: true
+              enabled: !actionProcess.running
+              tooltipText: "F · Rift jumps you there; come back and save when it's ready"
+              onClicked: root.createFreshWorkspace()
+            }
+
+            Button {
+              text: "Back"
+              iconText: "󰁍"
+              foreground: root.foreground
+              focusable: true
+              tooltipText: "Esc"
+              onClicked: root.backToBrowse()
+            }
+          }
+
+          Column {
+            visible: root.mode === "detail" && root.detailRift !== null
+            width: parent.width
+            spacing: Style.space(8)
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+              Button {
+                iconText: "󰁍"
+                tooltipText: "Back · Esc"
+                foreground: root.foreground
+                focusable: true
+                onClicked: root.backToBrowse()
+              }
+              Column {
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - parent.children[0].width - parent.spacing
+                spacing: Style.space(2)
+                Text {
+                  width: parent.width
+                  text: root.detailRift ? root.detailRift.name : ""
+                  elide: Text.ElideRight
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                  font.bold: true
+                }
+                Text {
+                  width: parent.width
+                  text: root.detailRift
+                    ? (root.detailRift.apps.length + " application" + (root.detailRift.apps.length === 1 ? "" : "s")
+                       + (root.detailRift.openWorkspace > 0 ? " · open on workspace " + root.detailRift.openWorkspace : " · not open")
+                       + (root.detailRift.startup ? " · opens at login" : ""))
+                    : ""
+                  elide: Text.ElideRight
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+            }
+
+            Repeater {
+              model: root.detailRift ? root.detailRift.apps : []
+              Column {
+                width: parent.width
+                spacing: 0
+                Text {
+                  width: parent.width
+                  text: "  " + (modelData.kind === "terminal" ? "󰆍 " : "󰘔 ") + modelData.name + (modelData.cwd ? "  " + modelData.cwd.replace(/^\/home\/[^\/]+/, "~") : "")
+                  elide: Text.ElideMiddle
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Text {
+                  visible: modelData.command && modelData.command.length > 0
+                  width: parent.width
+                  text: "      ⟳ " + (modelData.command ? modelData.command.join(" ") : "")
+                  elide: Text.ElideMiddle
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.italic: true
+                }
+              }
+            }
+
+            Rectangle { width: parent.width; height: 1; color: root.dim; opacity: 0.28 }
+
+            Button {
+              width: parent.width
+              text: root.detailRift && root.detailRift.openWorkspace > 0
+                ? "Go to workspace " + root.detailRift.openWorkspace
+                : "Open on a fresh workspace"
+              iconText: root.detailRift && root.detailRift.openWorkspace > 0 ? "󰁔" : "󰐊"
+              leftAlign: true
+              foreground: root.foreground
+              active: true
+              focusable: true
+              enabled: !actionProcess.running
+              tooltipText: "O · Enter"
+              onClicked: if (root.detailRift) root.openRift(root.detailRift.slug)
+            }
+
+            Button {
+              width: parent.width
+              text: root.detailIsHere
+                ? (root.stateData.changed ? "Update with this workspace (it changed)" : "Update with this workspace")
+                : (root.detailRift && root.detailRift.openWorkspace > 0
+                    ? "Update — go to workspace " + root.detailRift.openWorkspace + " first"
+                    : "Update — open this Rift first")
+              iconText: "󰑐"
+              leftAlign: true
+              foreground: root.foreground
+              focusable: true
+              enabled: root.detailIsHere && root.canWrite
+              tooltipText: "U · re-records the apps on this workspace into this Rift"
+              onClicked: root.updateRift(root.detailRift)
+            }
+
+            Button {
+              visible: root.detailRift && root.detailRift.previous ? true : false
+              width: parent.width
+              text: "Revert to the previous recipe"
+              iconText: "󰕌"
+              leftAlign: true
+              foreground: root.foreground
+              focusable: true
+              enabled: root.canWrite
+              tooltipText: "R"
+              onClicked: root.revertRift(root.detailRift)
+            }
+
+            Button {
+              width: parent.width
+              text: root.detailRift && root.detailRift.startup ? "Opens at login — turn off" : "Open at login"
+              iconText: root.detailRift && root.detailRift.startup ? "󰐥" : "󰒲"
+              leftAlign: true
+              foreground: root.foreground
+              focusable: true
+              enabled: !actionProcess.running
+              tooltipText: "L"
+              onClicked: root.toggleStartup(root.detailRift)
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+              Button {
+                text: root.confirmDelete ? "Yes, delete " + (root.detailRift ? root.detailRift.name : "") : "Delete this Rift"
+                iconText: "󰆴"
+                foreground: root.confirmDelete ? root.urgent : root.foreground
+                active: root.confirmDelete
+                focusable: true
+                enabled: !actionProcess.running
+                tooltipText: "D (twice)"
+                onClicked: root.deleteRift(root.detailRift)
+              }
+              Button {
+                visible: root.confirmDelete
+                text: "Cancel"
+                foreground: root.foreground
+                focusable: true
+                onClicked: root.confirmDelete = false
+              }
+            }
+          }
+
+          Column {
             visible: root.mode === "save"
             width: parent.width
             spacing: Style.space(10)
 
             Text {
-              text: root.currentRift ? "UPDATE THIS RIFT" : "SAVE THIS WORKSPACE"
+              text: "SAVE THIS WORKSPACE"
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
