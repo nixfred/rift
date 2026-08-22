@@ -22,6 +22,7 @@ Panel {
   property string pendingAction: ""
   property string stateOutput: ""
   property string actionOutput: ""
+  property bool refreshPending: false
 
   readonly property var barIdentity: hostWidget || root
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -47,7 +48,12 @@ Panel {
   }
 
   function refresh() {
-    if (!helperPath || stateProcess.running) return
+    if (!helperPath) return
+    if (stateProcess.running) {
+      refreshPending = true
+      return
+    }
+    refreshPending = false
     stateOutput = ""
     stateProcess.command = helperCommand(["state"])
     console.debug("rift: run", JSON.stringify(stateProcess.command))
@@ -149,6 +155,12 @@ Panel {
     stderr: SplitParser { onRead: function(line) { console.warn("rift: helper stderr:", line) } }
     onExited: function(exitCode) {
       console.debug("rift: state exited", exitCode, "bytes:", root.stateOutput.length)
+      if (root.refreshPending) {
+        root.refreshPending = false
+        console.debug("rift: discarding stale state response; queued refresh follows")
+        Qt.callLater(root.refresh)
+        return
+      }
       try {
         var response = JSON.parse(root.stateOutput)
         if (!response.ok) throw new Error(response.error || "Could not inspect this workspace")
@@ -275,6 +287,7 @@ Panel {
               tooltipText: "Fresh workspace · N"
               foreground: root.foreground
               focusable: true
+              enabled: !actionProcess.running
               onClicked: root.createFreshWorkspace()
             }
           }
