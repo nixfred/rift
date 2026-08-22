@@ -218,6 +218,32 @@ class RiftHelperTests(unittest.TestCase):
             rift.hypr_dispatch("workspace", "3")
         self.assertEqual(calls, [["hl.dsp.focus({ workspace = 3 })"], ["workspace", "3"]])
 
+    def test_hypr_json_treats_empty_or_invalid_stdout_as_runtime_error(self):
+        import subprocess as sp
+
+        with patch.object(
+            rift.subprocess,
+            "run",
+            return_value=sp.CompletedProcess(["hyprctl", "-j", "clients"], 0, "", ""),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
+                rift.hypr_json("clients")
+
+        with patch.object(
+            rift.subprocess,
+            "run",
+            return_value=sp.CompletedProcess(["hyprctl", "-j", "clients"], 0, "not-json", ""),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
+                rift.hypr_json("clients")
+
+        with patch.object(
+            rift.subprocess,
+            "run",
+            return_value=sp.CompletedProcess(["hyprctl", "-j", "clients"], 0, "[]", ""),
+        ):
+            self.assertEqual(rift.hypr_json("clients"), [])
+
     def test_wait_for_workspace_change_handles_delayed_transition(self):
         with patch.object(
             rift,

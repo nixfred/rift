@@ -126,7 +126,10 @@ def hypr_json(subject: str) -> Any:
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"hyprctl {subject} failed")
-    return json.loads(result.stdout)
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"hyprctl {subject} returned invalid JSON") from error
 
 
 def lua_dispatch(dispatcher: str, argument: str) -> str:
