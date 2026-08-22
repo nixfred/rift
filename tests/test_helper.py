@@ -90,6 +90,18 @@ class RiftHelperTests(unittest.TestCase):
         launch.assert_not_called()
         self.assertEqual(result["action"], "focused")
 
+    def test_runtime_state_survives_transient_workspace_query_failure(self):
+        expected = {
+            "signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+            "open": {"nova": {"workspace_id": 7, "workspace_name": "7"}},
+        }
+        rift.atomic_json(rift.RUNTIME_FILE, expected)
+
+        with patch.object(rift, "hypr_json", side_effect=RuntimeError("Hyprland busy")):
+            state = rift.runtime_state()
+
+        self.assertEqual(state, expected)
+
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(
             rift.terminal_recipe("ghostty", "/tmp/nova"),
