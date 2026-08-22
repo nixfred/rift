@@ -42,6 +42,17 @@ class RiftHelperTests(unittest.TestCase):
         runtime = rift.read_json(rift.RUNTIME_FILE, {})
         self.assertEqual(runtime["open"]["project-nova"]["workspace_id"], 4)
 
+    def test_save_aborts_if_focus_changes_during_snapshot(self):
+        with patch.object(rift, "current_apps", return_value=[]), patch.object(
+            rift,
+            "current_workspace",
+            side_effect=[{"id": 2, "name": "2"}, {"id": 3, "name": "3"}],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Workspace changed"):
+                rift.save_rift("Unstable")
+
+        self.assertFalse(rift.rift_path("unstable").exists())
+
     def test_atomic_json_supports_concurrent_writers(self):
         destination = rift.STATE_ROOT / "concurrent.json"
         barrier = threading.Barrier(12)
@@ -142,6 +153,20 @@ class RiftHelperTests(unittest.TestCase):
         with patch.object(rift, "_hyprctl_dispatch", side_effect=fake):
             rift.hypr_dispatch("workspace", "3")
         self.assertEqual(calls, [["hl.dsp.focus({ workspace = 3 })"], ["workspace", "3"]])
+
+    def test_wait_for_workspace_change_handles_delayed_transition(self):
+        with patch.object(
+            rift,
+            "current_workspace",
+            side_effect=[{"id": 2, "name": "2"}, {"id": 2, "name": "2"}, {"id": 3, "name": "3"}],
+        ), patch.object(rift.time, "sleep"):
+            workspace = rift.wait_for_workspace_change(2)
+        self.assertEqual(workspace["id"], 3)
+
+    def test_wait_for_workspace_change_times_out(self):
+        with patch.object(rift, "current_workspace", return_value={"id": 2, "name": "2"}):
+            with self.assertRaisesRegex(RuntimeError, "Timed out"):
+                rift.wait_for_workspace_change(2, timeout=0)
 
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(
