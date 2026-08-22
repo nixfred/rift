@@ -230,8 +230,35 @@ def proc_comm(pid: int) -> str:
         return ""
 
 
+def proc_ids(pid: int) -> tuple[int, int, int] | None:
+    """Return (ppid, pgrp, tpgid) from /proc/<pid>/stat, or None."""
+    try:
+        text = (Path("/proc") / str(pid) / "stat").read_text()
+        rest = text.rsplit(")", 1)[1].split()
+        return int(rest[1]), int(rest[2]), int(rest[5])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def capture_program(pid: int, fallback_cwd: str) -> dict[str, Any] | None:
+    _executable, argv, cwd = process_info(pid)
+    comm = proc_comm(pid)
+    if not argv or comm in SHELLS or comm in TERMINAL_HELPERS:
+        return None
+    program = Path(argv[0]).name
+    if program in SHELLS or program in TERMINAL_HELPERS:
+        return None
+    return {"command": argv, "program": program, "cwd": cwd or fallback_cwd}
+
+
 def terminal_session(pid: int) -> dict[str, Any]:
     """Find the shell under a terminal pid and whatever runs in its foreground.
+
+    The foreground program is the process group named by the shell's (or the
+    terminal's) tpgid — not "whatever child /proc listed last". Background
+    jobs are children too; using list order captured `sleep 100 &` instead of
+    the Claude session in front of it. Direct `kitty -e claude` has no shell;
+    tpgid on the terminal pid still finds claude.
 
     Returns {"cwd": shell cwd, "command": argv or [], "program": basename or ""}.
     """
@@ -252,19 +279,18 @@ def terminal_session(pid: int) -> dict[str, Any]:
                 break
             if comm in TERMINAL_HELPERS or not comm:
                 queue.append(child)
-    if not shell_pid:
+    target = shell_pid or pid
+    _exe, _argv, target_cwd = process_info(target)
+    session["cwd"] = target_cwd
+    ids = proc_ids(target)
+    if not ids:
         return session
-    _exe, _argv, shell_cwd = process_info(shell_pid)
-    session["cwd"] = shell_cwd
-    # The foreground program is the shell's child (last started wins).
-    for child in reversed(child_pids(shell_pid)):
-        executable, argv, cwd = process_info(child)
-        comm = proc_comm(child)
-        if not argv or comm in SHELLS:
-            continue
-        program = Path(argv[0]).name
-        session.update({"command": argv, "program": program, "cwd": cwd or shell_cwd})
-        break
+    _ppid, _pgrp, tpgid = ids
+    if tpgid <= 0 or tpgid == target:
+        return session
+    captured = capture_program(tpgid, target_cwd)
+    if captured:
+        session.update(captured)
     return session
 
 
