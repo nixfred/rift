@@ -125,6 +125,24 @@ class RiftHelperTests(unittest.TestCase):
 
         self.assertEqual(state, expected)
 
+    def test_lua_dispatch_formats_workspace_focus_for_hyprland_056(self):
+        self.assertEqual(rift.lua_dispatch("workspace", "7"), "hl.dsp.focus({ workspace = 7 })")
+        self.assertEqual(rift.lua_dispatch("workspace", "emptyn"), 'hl.dsp.focus({ workspace = "emptyn" })')
+
+    def test_hypr_dispatch_falls_back_to_legacy_syntax(self):
+        import subprocess as sp
+        calls = []
+
+        def fake(args):
+            calls.append(args)
+            if args[0].startswith("hl."):
+                return sp.CompletedProcess(args, 0, "", "Invalid dispatcher")
+            return sp.CompletedProcess(args, 0, "ok", "")
+
+        with patch.object(rift, "_hyprctl_dispatch", side_effect=fake):
+            rift.hypr_dispatch("workspace", "3")
+        self.assertEqual(calls, [["hl.dsp.focus({ workspace = 3 })"], ["workspace", "3"]])
+
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(
             rift.terminal_recipe("ghostty", "/tmp/nova"),

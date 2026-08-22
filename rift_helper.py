@@ -96,16 +96,28 @@ def hypr_json(subject: str) -> Any:
     return json.loads(result.stdout)
 
 
+def lua_dispatch(dispatcher: str, argument: str) -> str:
+    """Render a dispatcher call for Hyprland >= 0.56, whose hyprctl dispatch takes Lua."""
+    literal = argument if re.fullmatch(r"[+-]?\d+", argument) else json.dumps(argument)
+    if dispatcher == "workspace":
+        return f"hl.dsp.focus({{ workspace = {literal} }})"
+    return f"hl.dispatch({json.dumps(dispatcher)}, {literal})"
+
+
+def _hyprctl_dispatch(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["hyprctl", "dispatch", *args], capture_output=True, text=True, timeout=3, check=False)
+
+
 def hypr_dispatch(dispatcher: str, argument: str) -> None:
-    result = subprocess.run(
-        ["hyprctl", "dispatch", dispatcher, argument],
-        capture_output=True,
-        text=True,
-        timeout=3,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Hyprland dispatch failed")
+    # Hyprland 0.56 turned `hyprctl dispatch` into a Lua call; older releases
+    # still take `dispatch <name> <arg>`. Try the new form, fall back to legacy.
+    result = _hyprctl_dispatch([lua_dispatch(dispatcher, argument)])
+    output = (result.stdout + result.stderr).strip()
+    if result.returncode != 0 or output.lower().startswith("error") or "invalid dispatcher" in output.lower():
+        legacy = _hyprctl_dispatch([dispatcher, argument])
+        legacy_output = (legacy.stdout + legacy.stderr).strip()
+        if legacy.returncode != 0 or legacy_output.lower().startswith("error"):
+            raise RuntimeError(output or legacy_output or "Hyprland dispatch failed")
 
 
 def slugify(name: str) -> str:
