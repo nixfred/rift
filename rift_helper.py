@@ -791,8 +791,16 @@ def launch_app_result(app: dict[str, Any], rift: dict[str, Any]) -> dict[str, st
     argv = app.get("launch") or []
     if not isinstance(argv, list) or not argv:
         return {"app": identity, "status": "failed", "error": "Invalid launch recipe"}
-    cwd = str(app.get("cwd") or "")
-    if not cwd or not Path(cwd).is_dir():
+    recorded = str(app.get("cwd") or "")
+    if recorded:
+        if not Path(recorded).is_dir():
+            return {
+                "app": identity,
+                "status": "failed",
+                "error": f"Working directory no longer exists: {recorded}",
+            }
+        cwd = recorded
+    else:
         cwd = str(Path.home())
     env = os.environ.copy()
     env["RIFT_NAME"] = str(rift.get("name", ""))
