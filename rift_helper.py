@@ -429,7 +429,14 @@ def runtime_state() -> dict[str, Any]:
     signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
     state = normalized_runtime_state(read_json(RUNTIME_FILE, None), signature)
     try:
-        live_ids = {int(item.get("id", 0)) for item in hypr_json("workspaces")}
+        # A workspace that exists but holds no windows is nobody's Rift: Hyprland
+        # reuses numeric ids, so an empty workspace must never inherit a stale
+        # association (that is how an update once clobbered the wrong Rift).
+        live_ids = {
+            int(item.get("id", 0))
+            for item in hypr_json("workspaces")
+            if int(item.get("windows", 0) or 0) > 0
+        }
     except Exception:
         return state
     state["open"] = {
@@ -476,10 +483,31 @@ def state_payload() -> dict[str, Any]:
     }
 
 
-def save_rift(name: str, include_ids: list[str] | None = None) -> dict[str, Any]:
+def save_rift(
+    name: str,
+    include_ids: list[str] | None = None,
+    expect_workspace: int | None = None,
+    update_of: str | None = None,
+) -> dict[str, Any]:
     slug = slugify(name)
     workspace = current_workspace()
     workspace_id = int(workspace.get("id", 0))
+    # The panel tells us which workspace it believed it was looking at. If the
+    # user moved in the meantime, refuse rather than record the wrong workspace.
+    if expect_workspace is not None and expect_workspace != workspace_id:
+        raise RuntimeError(
+            f"You are on workspace {workspace_id} but the panel showed workspace {expect_workspace}. "
+            "Reopen Rift and try again."
+        )
+    if update_of is not None:
+        association = runtime_state().get("open", {}).get(slugify(update_of))
+        bound_to = int((association or {}).get("workspace_id", 0))
+        if bound_to != workspace_id:
+            where = f"workspace {bound_to}" if bound_to else "no open workspace"
+            raise RuntimeError(
+                f"{name} belongs to {where}, not workspace {workspace_id}. "
+                "Save this workspace as a new Rift instead."
+            )
     apps = current_apps(workspace)
     if include_ids is None:
         apps = [app for app in apps if app.get("selected", True)]
@@ -498,11 +526,17 @@ def save_rift(name: str, include_ids: list[str] | None = None) -> dict[str, Any]
         "apps": apps,
         "savedAt": int(time.time()),
     }
-    # Keep the recipe we are replacing so the panel can offer a one-click revert.
+    # Keep the recipes we are replacing (newest first, max 5) so the panel can
+    # offer revert — and revert again if the first revert was wrong too.
+    history = list(existing.get("history") or [])
+    if existing.get("previous") and not history:  # migrate v0.2.0 single-slot format
+        history = [existing["previous"]]
     if isinstance(existing.get("apps"), list) and existing.get("apps") != apps:
-        value["previous"] = {"apps": existing["apps"], "savedAt": existing.get("savedAt", 0)}
-    elif existing.get("previous"):
-        value["previous"] = existing["previous"]
+        history.insert(0, {"apps": existing["apps"], "savedAt": existing.get("savedAt", 0)})
+    history = history[:5]
+    if history:
+        value["history"] = history
+        value["previous"] = history[0]
     atomic_json(rift_path(slug), value)
     with runtime_transaction() as runtime:
         runtime["open"] = {
@@ -659,12 +693,17 @@ def set_startup(slug: str, enabled: bool) -> dict[str, Any]:
 def revert_rift(slug: str) -> dict[str, Any]:
     """Swap the current recipe with the previous one, so revert is itself revertible."""
     rift = load_rift(slug)
-    previous = rift.get("previous")
-    if not isinstance(previous, dict) or not isinstance(previous.get("apps"), list):
+    history = list(rift.get("history") or ([rift["previous"]] if rift.get("previous") else []))
+    if not history or not isinstance(history[0], dict) or not isinstance(history[0].get("apps"), list):
         raise ValueError(f"Nothing to revert for {rift.get('name', slug)}")
-    rift["previous"] = {"apps": rift.get("apps", []), "savedAt": rift.get("savedAt", 0)}
-    rift["apps"] = previous["apps"]
+    restored = history.pop(0)
+    # The recipe we are leaving goes to the back of the stack so revert is itself revertible.
+    history.append({"apps": rift.get("apps", []), "savedAt": rift.get("savedAt", 0)})
+    history = history[:5]
+    rift["apps"] = restored["apps"]
     rift["savedAt"] = int(time.time())
+    rift["history"] = history
+    rift["previous"] = history[0]
     return persist_rift(rift)
 
 
@@ -716,6 +755,8 @@ def parser() -> argparse.ArgumentParser:
     save = sub.add_parser("save")
     save.add_argument("name")
     save.add_argument("--apps", default=None)
+    save.add_argument("--expect-workspace", type=int, default=None)
+    save.add_argument("--update-of", default=None)
     open_command = sub.add_parser("open")
     open_command.add_argument("slug")
     startup = sub.add_parser("startup")
@@ -737,7 +778,7 @@ def main() -> int:
             emit(state_payload())
         elif args.command == "save":
             include = None if args.apps is None else (args.apps.split("\x1f") if args.apps else [])
-            emit(save_rift(args.name, include))
+            emit(save_rift(args.name, include, args.expect_workspace, args.update_of))
         elif args.command == "open":
             emit(open_rift(args.slug))
         elif args.command == "startup":

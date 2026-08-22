@@ -92,7 +92,7 @@ class RiftHelperTests(unittest.TestCase):
             except Exception as error:
                 failures.append(error)
 
-        with patch.object(rift, "hypr_json", return_value=[{"id": item} for item in range(1, 9)]):
+        with patch.object(rift, "hypr_json", return_value=[{"id": item, "windows": 1} for item in range(1, 9)]):
             threads = [threading.Thread(target=associate, args=(item,)) for item in range(1, 9)]
             for thread in threads:
                 thread.start()
@@ -144,7 +144,7 @@ class RiftHelperTests(unittest.TestCase):
                 "open": {"nova": {"workspace_id": 7, "workspace_name": "7"}},
             },
         )
-        with patch.object(rift, "hypr_json", return_value=[{"id": 7}]), patch.object(
+        with patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}]), patch.object(
             rift, "hypr_dispatch"
         ) as dispatch, patch.object(rift, "launch_app") as launch:
             result = rift.open_rift("nova")
@@ -278,6 +278,50 @@ class RiftHelperTests(unittest.TestCase):
         stored = rift.read_json(rift.rift_path("clean"), {})
         self.assertNotIn("validationErrors", stored)
         self.assertTrue(stored["startup"])
+
+    def test_update_refuses_when_panel_workspace_is_stale(self):
+        with patch.object(rift, "current_workspace", return_value={"id": 10, "name": "10"}), patch.object(
+            rift, "current_apps", return_value=[]
+        ), patch.object(rift, "hypr_json", return_value=[{"id": 10, "windows": 0}]):
+            with self.assertRaisesRegex(RuntimeError, "workspace 10 but the panel showed workspace 7"):
+                rift.save_rift("Nova", expect_workspace=7)
+
+    def test_update_refuses_when_rift_is_bound_elsewhere(self):
+        rift.ensure_dirs()
+        rift.atomic_json(
+            rift.RUNTIME_FILE,
+            {"signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+             "open": {"nova": {"workspace_id": 7, "workspace_name": "7"}}},
+        )
+        with patch.object(rift, "current_workspace", return_value={"id": 10, "name": "10"}), patch.object(
+            rift, "current_apps", return_value=[]
+        ), patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}, {"id": 10, "windows": 0}]):
+            with self.assertRaisesRegex(RuntimeError, "belongs to workspace 7, not workspace 10"):
+                rift.save_rift("Nova", expect_workspace=10, update_of="nova")
+        self.assertFalse(rift.rift_path("nova").exists())
+
+    def test_empty_workspace_never_keeps_an_association(self):
+        rift.atomic_json(
+            rift.RUNTIME_FILE,
+            {"signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+             "open": {"nova": {"workspace_id": 8, "workspace_name": "8"}}},
+        )
+        with patch.object(rift, "hypr_json", return_value=[{"id": 8, "windows": 0}]):
+            self.assertEqual(rift.runtime_state()["open"], {})
+        with patch.object(rift, "hypr_json", return_value=[{"id": 8, "windows": 2}]):
+            self.assertIn("nova", rift.runtime_state()["open"])
+
+    def test_history_keeps_several_recipes_and_revert_walks_back(self):
+        ws = {"id": 3, "name": "3"}
+        with patch.object(rift, "current_workspace", return_value=ws), patch.object(
+            rift, "hypr_json", return_value=[{"id": 3, "windows": 1}]
+        ):
+            for name in ("a", "b", "c"):
+                with patch.object(rift, "current_apps", return_value=[{"id": name, "name": name, "selected": True, "launch": [name]}]):
+                    rift.save_rift("Nova")
+        self.assertEqual([h["apps"][0]["id"] for h in rift.load_rift("nova")["history"]], ["b", "a"])
+        self.assertEqual(rift.revert_rift("nova")["apps"][0]["id"], "b")
+        self.assertEqual(rift.revert_rift("nova")["apps"][0]["id"], "a")
 
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(

@@ -2,6 +2,16 @@
 
 All notable changes to Rift. The version shown in the panel header (`RIFTS vX.Y.Z`) and bar tooltip is the one in `manifest.json`; tests keep them in lockstep.
 
+## v0.2.1 — 2026-08-21 · Never update the wrong Rift
+
+Fixes a real incident: the panel was opened on a Rift's workspace, the user moved to a fresh workspace, pressed `󰑐`, and the *other* Rift was overwritten with the empty workspace.
+
+- Panel tracks the focused Hyprland workspace live; any change re-reads state and **every write control is disabled until the model matches the focused workspace** ("Reading workspace N…")
+- Helper `save` takes `--expect-workspace` and `--update-of`; it **refuses** if the focused workspace differs from what the panel showed, or if the Rift being updated is bound to another workspace — with a plain-English error
+- An association only counts when its workspace **has windows**: Hyprland reuses numeric ids, so an empty workspace can never inherit a stale Rift
+- Recipe **history** (last 5) replaces the single `previous` slot; Revert walks back step by step and stays revertible
+- "Save this workspace as a different Rift" is always offered when standing on a Rift (`N`), so you are never stuck
+
 ## v0.2.0 — 2026-08-21 · Reliability
 
 - Hyprland ≥ 0.56 Lua dispatch (`hl.dsp.focus({ workspace = N })`) with legacy fallback — open/focus works again

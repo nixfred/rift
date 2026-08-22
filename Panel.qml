@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Hyprland
 import qs.Commons
 import qs.Ui
 
@@ -10,7 +11,7 @@ Panel {
   ipcTarget: "nixfred.rift"
   manageIpc: false
 
-  readonly property string riftVersion: "0.2.0"  // keep in lockstep with manifest.json (tests enforce)
+  readonly property string riftVersion: "0.2.1"  // keep in lockstep with manifest.json (tests enforce)
   property var anchorItem: null
   property var hostWidget: null
   property string helperPath: ""
@@ -24,6 +25,15 @@ Panel {
   property string stateOutput: ""
   property string actionOutput: ""
   property bool refreshPending: false
+  // The panel's model is only trustworthy when it describes the workspace that
+  // is focused RIGHT NOW. Anything that writes (save/update/revert) is disabled
+  // while stale, and the helper double-checks with --expect-workspace anyway.
+  property bool stateStale: true
+  readonly property int liveWorkspaceId: Hyprland.focusedWorkspace ? Hyprland.focusedWorkspace.id : 0
+  readonly property bool stale: stateStale || stateProcess.running
+    || (stateData.workspace && stateData.workspace.id !== liveWorkspaceId)
+  readonly property bool canWrite: !stale && !actionProcess.running
+  onLiveWorkspaceIdChanged: if (opened) { stateStale = true; refresh() }
 
   readonly property var barIdentity: hostWidget || root
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -75,6 +85,7 @@ Panel {
     mode = "browse"
     statusText = ""
     errorText = ""
+    stateStale = true
     refresh()
     controller.show()
   }
@@ -124,7 +135,8 @@ Panel {
       nameField.forceActiveFocus()
       return
     }
-    runAction("save", ["save", name, "--apps", selectedAppIds().join("\x1f")])
+    runAction("save", ["save", name, "--apps", selectedAppIds().join("\x1f"),
+                       "--expect-workspace", String(stateData.workspace.id)])
   }
 
   function openRift(slug) { runAction("open", ["open", slug]) }
@@ -132,12 +144,13 @@ Panel {
   function beginNewRift() { beginSave("") }
 
   function headerAction() {
+    if (!canWrite) return
     if (currentRift) updateCurrent()
     else beginNewRift()
   }
 
   function revertCurrent() {
-    if (currentRift && currentRift.previous) runAction("revert", ["revert", currentRift.slug])
+    if (currentRift && currentRift.previous && canWrite) runAction("revert", ["revert", currentRift.slug])
   }
 
   function toggleStartup(rift) {
@@ -146,7 +159,10 @@ Panel {
 
   // One-click: re-record whatever is on this workspace under the current Rift's name.
   function updateCurrent() {
-    if (currentRift) runAction("update", ["save", currentRift.name])
+    if (!currentRift || !canWrite) return
+    runAction("update", ["save", currentRift.name,
+                         "--expect-workspace", String(stateData.workspace.id),
+                         "--update-of", currentRift.slug])
   }
 
   function moveSelection(delta) {
@@ -174,6 +190,7 @@ Panel {
         var response = JSON.parse(root.stateOutput)
         if (!response.ok) throw new Error(response.error || "Could not inspect this workspace")
         root.stateData = response.data
+        root.stateStale = false
         console.debug("rift: state workspace", response.data.workspace.id, "apps:", response.data.apps.length, "rifts:", response.data.rifts.length, "current:", response.data.currentRift || "-")
         if (root.selectedIndex >= root.rifts.length) root.selectedIndex = Math.max(0, root.rifts.length - 1)
       } catch (error) {
@@ -251,6 +268,7 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(text) {
+        if (!root.canWrite) return
         if (text === "n" || text === "N") root.beginNewRift()
         else if (text === "s" || text === "S") root.beginSave(root.currentRift ? root.currentRift.name : "")
         else if ((text === "u" || text === "U") && root.currentRift) root.updateCurrent()
@@ -306,9 +324,11 @@ Panel {
               }
 
               Text {
-                text: root.currentRift
-                  ? (root.currentRift.name + " · workspace " + root.stateData.workspace.id)
-                  : ("Workspace " + root.stateData.workspace.id + " · unsaved")
+                text: root.stale
+                  ? ("Reading workspace " + root.liveWorkspaceId + "…")
+                  : root.currentRift
+                    ? (root.currentRift.name + " · workspace " + root.stateData.workspace.id)
+                    : ("Workspace " + root.stateData.workspace.id + " · unsaved")
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -324,7 +344,7 @@ Panel {
               foreground: root.foreground
               active: root.currentRift ? root.stateData.changed === true : false
               focusable: true
-              enabled: !actionProcess.running
+              enabled: root.canWrite
               onClicked: root.headerAction()
             }
           }
@@ -351,11 +371,24 @@ Panel {
               foreground: root.foreground
               active: root.currentRift && !root.stateData.changed
               focusable: true
-              enabled: !actionProcess.running
+              enabled: root.canWrite
               onClicked: {
                 if (root.currentRift && root.stateData.changed) root.updateCurrent()
                 else if (!root.currentRift) root.beginNewRift()
               }
+            }
+
+            Button {
+              visible: root.currentRift ? true : false
+              width: parent.width
+              text: "Save this workspace as a different Rift"
+              iconText: "＋"
+              leftAlign: true
+              foreground: root.foreground
+              focusable: true
+              enabled: root.canWrite
+              tooltipText: "N"
+              onClicked: root.beginNewRift()
             }
 
             Button {
@@ -366,7 +399,7 @@ Panel {
               leftAlign: true
               foreground: root.foreground
               focusable: true
-              enabled: !actionProcess.running
+              enabled: root.canWrite
               onClicked: root.revertCurrent()
             }
 
@@ -529,7 +562,7 @@ Panel {
                 iconText: "󰆓"
                 foreground: root.foreground
                 active: true
-                enabled: !actionProcess.running && root.apps.length > 0
+                enabled: root.canWrite && root.apps.length > 0
                 focusable: true
                 onClicked: root.saveCurrent()
               }
