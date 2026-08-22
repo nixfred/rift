@@ -153,6 +153,44 @@ class RiftHelperTests(unittest.TestCase):
 
         self.assertEqual(state, expected)
 
+    def test_runtime_state_recovers_from_wrong_json_shapes(self):
+        signature = rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+        malformed_values = [[], "broken", {"signature": signature, "open": []}]
+        for malformed in malformed_values:
+            with self.subTest(value=malformed):
+                rift.atomic_json(rift.RUNTIME_FILE, malformed)
+                with patch.object(rift, "hypr_json", return_value=[]):
+                    self.assertEqual(rift.runtime_state(), {"signature": signature, "open": {}})
+
+    def test_load_rifts_skips_invalid_files_and_app_recipes(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.RIFTS_ROOT / "wrong-name.json", {
+            "schemaVersion": 1, "slug": "different", "name": "Different", "apps": []
+        })
+        rift.atomic_json(rift.RIFTS_ROOT / "nova.json", {
+            "schemaVersion": 1,
+            "slug": "nova",
+            "name": "Nova",
+            "apps": [
+                {"id": "bad", "launch": "missing-app"},
+                {"id": "good", "launch": ["working-app", "--flag"]},
+            ],
+        })
+
+        loaded = rift.load_rifts()
+
+        self.assertEqual([item["slug"] for item in loaded], ["nova"])
+        self.assertEqual([item["id"] for item in loaded[0]["apps"]], ["good"])
+        self.assertEqual(loaded[0]["validationErrors"], ["Skipped invalid app recipe at index 0"])
+
+    def test_load_rift_rejects_unsupported_schema(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.RIFTS_ROOT / "nova.json", {
+            "schemaVersion": 99, "slug": "nova", "name": "Nova", "apps": []
+        })
+        with self.assertRaisesRegex(ValueError, "not found or invalid"):
+            rift.load_rift("nova")
+
     def test_lua_dispatch_formats_workspace_focus_for_hyprland_056(self):
         self.assertEqual(rift.lua_dispatch("workspace", "7"), "hl.dsp.focus({ workspace = 7 })")
         self.assertEqual(rift.lua_dispatch("workspace", "emptyn"), 'hl.dsp.focus({ workspace = "emptyn" })')
