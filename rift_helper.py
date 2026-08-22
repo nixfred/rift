@@ -272,12 +272,51 @@ def current_apps() -> list[dict[str, Any]]:
     return apps
 
 
+def valid_app_recipe(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    launch = value.get("launch")
+    return bool(
+        isinstance(launch, list)
+        and launch
+        and all(isinstance(argument, str) and "\0" not in argument for argument in launch)
+    )
+
+
+def validated_rift(value: Any, expected_slug: str | None = None) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or value.get("schemaVersion") != 1:
+        return None
+    slug = value.get("slug")
+    name = value.get("name")
+    apps = value.get("apps")
+    if not isinstance(slug, str) or not slug:
+        return None
+    try:
+        if slugify(slug) != slug:
+            return None
+    except ValueError:
+        return None
+    if expected_slug is not None and slug != expected_slug:
+        return None
+    if not isinstance(name, str) or not name.strip() or not isinstance(apps, list):
+        return None
+    result = dict(value)
+    result["apps"] = [app for app in apps if valid_app_recipe(app)]
+    result["validationErrors"] = [
+        f"Skipped invalid app recipe at index {index}"
+        for index, app in enumerate(apps)
+        if not valid_app_recipe(app)
+    ]
+    result["startup"] = value.get("startup") is True
+    return result
+
+
 def load_rifts() -> list[dict[str, Any]]:
     ensure_dirs()
     result = []
     for path in sorted(RIFTS_ROOT.glob("*.json")):
-        value = read_json(path, None)
-        if isinstance(value, dict) and value.get("slug"):
+        value = validated_rift(read_json(path, None), path.stem)
+        if value is not None:
             result.append(value)
     result.sort(key=lambda item: str(item.get("name", "")).casefold())
     return result
@@ -288,17 +327,39 @@ def rift_path(slug: str) -> Path:
 
 
 def load_rift(slug: str) -> dict[str, Any]:
-    value = read_json(rift_path(slug), None)
-    if not isinstance(value, dict):
-        raise ValueError(f"Rift not found: {slug}")
+    expected_slug = slugify(slug)
+    value = validated_rift(read_json(rift_path(expected_slug), None), expected_slug)
+    if value is None:
+        raise ValueError(f"Rift not found or invalid: {slug}")
     return value
+
+
+def normalized_runtime_state(value: Any, signature: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("signature") != signature:
+        return {"signature": signature, "open": {}}
+    associations = value.get("open")
+    if not isinstance(associations, dict):
+        associations = {}
+    valid = {}
+    for slug, association in associations.items():
+        if not isinstance(slug, str) or not isinstance(association, dict):
+            continue
+        try:
+            workspace_id = int(association.get("workspace_id", 0))
+        except (TypeError, ValueError):
+            continue
+        if workspace_id <= 0:
+            continue
+        valid[slug] = {
+            "workspace_id": workspace_id,
+            "workspace_name": str(association.get("workspace_name", "")),
+        }
+    return {"signature": signature, "open": valid}
 
 
 def runtime_state() -> dict[str, Any]:
     signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
-    state = read_json(RUNTIME_FILE, {"signature": signature, "open": {}})
-    if state.get("signature") != signature:
-        state = {"signature": signature, "open": {}}
+    state = normalized_runtime_state(read_json(RUNTIME_FILE, None), signature)
     try:
         live_ids = {int(item.get("id", 0)) for item in hypr_json("workspaces")}
     except Exception:
@@ -427,7 +488,13 @@ def open_rift(slug: str) -> dict[str, Any]:
     }
     save_runtime(runtime)
     launched = sum(1 for app in rift.get("apps", []) if launch_app(app, rift))
-    return {"action": "opened", "rift": rift["slug"], "workspace": workspace_id, "launched": launched}
+    return {
+        "action": "opened",
+        "rift": rift["slug"],
+        "workspace": workspace_id,
+        "launched": launched,
+        "validationErrors": rift.get("validationErrors", []),
+    }
 
 
 def new_workspace() -> dict[str, Any]:
