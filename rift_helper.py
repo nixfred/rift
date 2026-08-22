@@ -284,8 +284,8 @@ def current_workspace() -> dict[str, Any]:
     return hypr_json("activeworkspace")
 
 
-def current_apps() -> list[dict[str, Any]]:
-    workspace = current_workspace()
+def current_apps(workspace: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    workspace = workspace or current_workspace()
     workspace_id = int(workspace.get("id", 0))
     entries = desktop_entries()
     apps: list[dict[str, Any]] = []
@@ -419,7 +419,7 @@ def runtime_transaction() -> Iterator[dict[str, Any]]:
 
 def state_payload() -> dict[str, Any]:
     workspace = current_workspace()
-    apps = current_apps()
+    apps = current_apps(workspace)
     runtime = runtime_state()
     current_slug = ""
     for slug, association in runtime.get("open", {}).items():
@@ -441,12 +441,17 @@ def state_payload() -> dict[str, Any]:
 
 def save_rift(name: str, include_ids: list[str] | None = None) -> dict[str, Any]:
     slug = slugify(name)
-    apps = current_apps()
+    workspace = current_workspace()
+    workspace_id = int(workspace.get("id", 0))
+    apps = current_apps(workspace)
     if include_ids is None:
         apps = [app for app in apps if app.get("selected", True)]
     else:
         wanted = set(include_ids)
         apps = [app for app in apps if app["id"] in wanted]
+    focused = current_workspace()
+    if int(focused.get("id", 0)) != workspace_id:
+        raise RuntimeError("Workspace changed while saving; try again")
     existing = read_json(rift_path(slug), {})
     value = {
         "schemaVersion": 1,
@@ -462,8 +467,6 @@ def save_rift(name: str, include_ids: list[str] | None = None) -> dict[str, Any]
     elif existing.get("previous"):
         value["previous"] = existing["previous"]
     atomic_json(rift_path(slug), value)
-    workspace = current_workspace()
-    workspace_id = int(workspace.get("id", 0))
     with runtime_transaction() as runtime:
         runtime["open"] = {
             open_slug: association
@@ -516,6 +519,18 @@ def launch_app(app: dict[str, Any], rift: dict[str, Any]) -> bool:
     return True
 
 
+def wait_for_workspace_change(previous_id: int, timeout: float = 2.0) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while True:
+        workspace = current_workspace()
+        workspace_id = int(workspace.get("id", 0))
+        if workspace_id > 0 and workspace_id != previous_id:
+            return workspace
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Timed out waiting for a fresh workspace")
+        time.sleep(0.05)
+
+
 def open_rift(slug: str) -> dict[str, Any]:
     rift = load_rift(slug)
     with runtime_transaction() as runtime:
@@ -524,9 +539,9 @@ def open_rift(slug: str) -> dict[str, Any]:
             hypr_dispatch("workspace", str(association["workspace_id"]))
             return {"action": "focused", "rift": rift["slug"], "workspace": association["workspace_id"]}
 
+        previous_id = int(current_workspace().get("id", 0))
         hypr_dispatch("workspace", "emptyn")
-        time.sleep(0.12)
-        workspace = current_workspace()
+        workspace = wait_for_workspace_change(previous_id)
         workspace_id = int(workspace.get("id", 0))
         runtime.setdefault("open", {})[rift["slug"]] = {
             "workspace_id": workspace_id,
@@ -543,9 +558,9 @@ def open_rift(slug: str) -> dict[str, Any]:
 
 
 def new_workspace() -> dict[str, Any]:
+    previous_id = int(current_workspace().get("id", 0))
     hypr_dispatch("workspace", "emptyn")
-    time.sleep(0.12)
-    workspace = current_workspace()
+    workspace = wait_for_workspace_change(previous_id)
     return {"workspace": {"id": workspace.get("id", 0), "name": workspace.get("name", "")}}
 
 
