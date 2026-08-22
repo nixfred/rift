@@ -1057,9 +1057,9 @@ def delete_rift(slug: str) -> None:
     path = rift_path(slug)
     if not path.exists():
         raise ValueError(f"Rift not found: {slug}")
-    path.unlink()
     with runtime_transaction() as runtime:
         runtime.get("open", {}).pop(slugify(slug), None)
+    path.unlink()
 
 
 def startup_open() -> dict[str, Any]:

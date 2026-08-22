@@ -519,6 +519,27 @@ class RiftHelperTests(unittest.TestCase):
         self.assertTrue(rift.rift_path("old").exists())
         self.assertTrue(rift.rift_path("shiny-new").exists())
 
+    def test_delete_removes_runtime_association_before_file(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.rift_path("nova"), {"schemaVersion": 1, "slug": "nova", "name": "Nova", "apps": []})
+        rift.atomic_json(
+            rift.RUNTIME_FILE,
+            {"signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+             "open": {"nova": {"workspace_id": 4, "workspace_name": "4"}}},
+        )
+        with patch.object(rift, "hypr_json", return_value=[{"id": 4, "windows": 1}]):
+            rift.delete_rift("nova")
+            self.assertNotIn("nova", rift.runtime_state()["open"])
+        self.assertFalse(rift.rift_path("nova").exists())
+
+    def test_delete_keeps_file_if_runtime_update_fails(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.rift_path("nova"), {"schemaVersion": 1, "slug": "nova", "name": "Nova", "apps": []})
+        with patch.object(rift, "runtime_transaction", side_effect=RuntimeError("runtime locked")):
+            with self.assertRaisesRegex(RuntimeError, "runtime locked"):
+                rift.delete_rift("nova")
+        self.assertTrue(rift.rift_path("nova").exists())
+
     def test_terminal_session_finds_shell_cwd_and_foreground_program(self):
         # kitty(100) -> kitten(101), bash(102), kitten(103); bash -> claude(200)
         tree = {100: [101, 102, 103], 102: [200]}
