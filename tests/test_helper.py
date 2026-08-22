@@ -510,6 +510,29 @@ class RiftHelperTests(unittest.TestCase):
             self.assertFalse(rift.rift_path("old").exists())
             self.assertEqual(rift.runtime_state()["open"]["shiny-new"]["workspace_id"], 4)
 
+    def test_delete_removes_definition_and_runtime_association(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.rift_path("nova"), {"schemaVersion": 1, "slug": "nova", "name": "Nova", "apps": []})
+        rift.atomic_json(
+            rift.RUNTIME_FILE,
+            {
+                "signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+                "open": {"nova": {"workspace_id": 7, "workspace_name": "7"}},
+            },
+        )
+        with patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}]):
+            rift.delete_rift("nova")
+            self.assertFalse(rift.rift_path("nova").exists())
+            self.assertEqual(rift.runtime_state()["open"], {})
+
+    def test_delete_keeps_file_if_runtime_update_fails(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.rift_path("nova"), {"schemaVersion": 1, "slug": "nova", "name": "Nova", "apps": []})
+        with patch.object(rift, "runtime_transaction", side_effect=RuntimeError("runtime locked")):
+            with self.assertRaisesRegex(RuntimeError, "runtime locked"):
+                rift.delete_rift("nova")
+        self.assertTrue(rift.rift_path("nova").exists())
+
     def test_rename_keeps_old_file_if_runtime_update_fails(self):
         rift.ensure_dirs()
         rift.atomic_json(rift.rift_path("old"), {"schemaVersion": 1, "slug": "old", "name": "Old", "apps": []})
