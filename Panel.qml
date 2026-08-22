@@ -99,6 +99,7 @@ Panel {
 
   function open() {
     mode = "browse"
+    renaming = false
     statusText = ""
     errorText = ""
     confirmDelete = false
@@ -116,6 +117,7 @@ Panel {
     controller.hide()
     mode = "browse"
     confirmDelete = false
+    renaming = false
   }
 
   function toggle() { opened ? close() : open() }
