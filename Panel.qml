@@ -11,7 +11,7 @@ Panel {
   ipcTarget: "nixfred.rift"
   manageIpc: false
 
-  readonly property string riftVersion: "0.3.7"  // keep in lockstep with manifest.json (tests enforce)
+  readonly property string riftVersion: "0.3.8"  // keep in lockstep with manifest.json (tests enforce)
   property var anchorItem: null
   property var hostWidget: null
   property string helperPath: ""

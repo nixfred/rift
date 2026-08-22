@@ -781,6 +781,17 @@ class RiftHelperTests(unittest.TestCase):
                              ["kitty", "--hold", "codex"])
             self.assertEqual(rift.resolve_launch(["kitty", "claude", "--continue"], "/p/one"), ["kitty", "claude", "--continue"])
 
+    def test_grok_under_node_is_captured_and_resumed(self):
+        argv = ["node", "/x/node_modules/@xai-official/grok/bin/grok", "--yolo"]
+        with patch.object(rift.shutil, "which", side_effect=lambda name: "/bin/" + name if name == "grok" else None):
+            program, replay = rift.unwrap_interpreter(argv)
+            self.assertEqual((program, replay), ("grok", ["grok", "--yolo"]))
+            self.assertEqual(rift.resume_command({"program": program, "command": replay}), ["grok", "--yolo", "--continue"])
+        # unknown script not on PATH: keep argv as-is, program = script name
+        with patch.object(rift.shutil, "which", return_value=None):
+            self.assertEqual(rift.unwrap_interpreter(["node", "/srv/app/server.js"]), ("server.js", ["node", "/srv/app/server.js"]))
+        self.assertEqual(rift.unwrap_interpreter(["claude", "-c"]), ("claude", ["claude", "-c"]))
+
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(
             rift.terminal_recipe("ghostty", "/tmp/nova"),
