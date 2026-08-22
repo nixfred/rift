@@ -352,6 +352,42 @@ class RiftHelperTests(unittest.TestCase):
             self.assertFalse(rift.rift_path("old").exists())
             self.assertEqual(rift.runtime_state()["open"]["shiny-new"]["workspace_id"], 4)
 
+    def test_terminal_session_finds_shell_cwd_and_foreground_program(self):
+        # kitty(100) -> kitten(101), bash(102), kitten(103); bash -> claude(200)
+        tree = {100: [101, 102, 103], 102: [200]}
+        comm = {101: "kitten", 102: "bash", 103: "kitten", 200: "claude"}
+        info = {
+            102: ("/usr/bin/bash", ["bash"], "/home/pi/Projects/rift"),
+            200: ("/usr/bin/node", ["claude", "--append-system-prompt-file", "/x/LARRY.md", "--dangerously-skip-permissions"], "/home/pi/Projects/rift"),
+        }
+        with patch.object(rift, "child_pids", side_effect=lambda pid: tree.get(pid, [])), patch.object(
+            rift, "proc_comm", side_effect=lambda pid: comm.get(pid, "")
+        ), patch.object(rift, "process_info", side_effect=lambda pid: info.get(pid, ("", [], ""))):
+            session = rift.terminal_session(100)
+        self.assertEqual(session["cwd"], "/home/pi/Projects/rift")
+        self.assertEqual(session["program"], "claude")
+        resumed = rift.resume_command(session)
+        self.assertEqual(resumed[-1], "--continue")
+        self.assertIn("--dangerously-skip-permissions", resumed)
+        self.assertEqual(
+            rift.terminal_recipe("kitty", "/home/pi/Projects/rift", resumed)[:3],
+            ["kitty", "--directory", "/home/pi/Projects/rift"],
+        )
+
+    def test_resume_command_policy(self):
+        self.assertEqual(rift.resume_command({"command": ["codex", "--yolo"], "program": "codex"}), ["codex", "resume", "--last"])
+        self.assertEqual(rift.resume_command({"command": ["nvim", "a.py"], "program": "nvim"}), ["nvim", "a.py"])
+        self.assertEqual(rift.resume_command({"command": ["python3", "-m", "http.server"], "program": "python3"}), [])
+        self.assertEqual(rift.resume_command({"command": [], "program": ""}), [])
+        self.assertEqual(rift.resume_command({"command": ["claude", "--continue"], "program": "claude"}), ["claude", "--continue"])
+
+    def test_terminal_recipe_runs_command_per_terminal(self):
+        self.assertEqual(rift.terminal_recipe("ghostty", "/p", ["btop"]), ["ghostty", "--working-directory=/p", "--wait-after-command=true", "-e", "btop"])
+        self.assertEqual(rift.terminal_recipe("alacritty", "/p", ["btop"]), ["alacritty", "--working-directory", "/p", "--hold", "-e", "btop"])
+        self.assertEqual(rift.terminal_recipe("kitty", "/p", ["btop"]), ["kitty", "--directory", "/p", "--hold", "btop"])
+        self.assertEqual(rift.terminal_recipe("wezterm", "/p", ["btop"]), ["wezterm", "start", "--cwd", "/p", "--", "btop"])
+        self.assertEqual(rift.terminal_recipe("foot", "", []), ["foot"])
+
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(
             rift.terminal_recipe("ghostty", "/tmp/nova"),

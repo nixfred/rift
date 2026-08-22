@@ -2,6 +2,15 @@
 
 All notable changes to Rift. The version shown in the panel header (`RIFTS vX.Y.Z`) and bar tooltip is the one in `manifest.json`; tests keep them in lockstep.
 
+## v0.3.1 — 2026-08-21 · Deep terminal capture
+
+- Terminals now record the **shell's real cwd** (walks terminal → shell → foreground program via `/proc`), not the terminal's launch dir
+- **Claude Code sessions come back**: `claude … --continue` in that directory (your wrapper flags preserved); Codex: `codex resume --last`; common TUIs (`nvim`, `btop`, `lazygit`, `ssh`, …) replayed as-is; anything else is recorded but not replayed
+- Terminals launch with `--hold` so the window survives the program exiting
+- Editors keep their project folder (`code /path`) instead of a bare `.desktop` launch
+- Entry view shows each app's directory and the command it will run
+- README: "What a Rift actually saves"
+
 ## v0.3.0 — 2026-08-21 · Entries, help, delete
 
 - `＋` is always top-right and opens an explicit **New Rift** chooser: *save what's on this workspace* or *start on a fresh, empty workspace*

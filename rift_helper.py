@@ -180,6 +180,113 @@ def process_info(pid: int) -> tuple[str, list[str], str]:
     return executable, argv, cwd
 
 
+# ---------------------------------------------------------------------------
+# Deep terminal capture: what is really going on inside that terminal window?
+# Hyprland gives us the terminal's pid. Its cwd is where the terminal was
+# *started* (usually $HOME) — useless. The shell underneath knows the real
+# directory, and the program in the foreground (claude, codex, nvim, btop…)
+# is what the user actually wants back.
+# ---------------------------------------------------------------------------
+
+SHELLS = {"bash", "zsh", "fish", "sh", "dash", "nu", "nushell", "elvish", "xonsh", "tcsh", "ksh"}
+TERMINAL_HELPERS = {"kitten", "ghostty", "alacritty", "foot", "wezterm-gui", "wezterm", "kitty"}
+# Programs that know how to pick their own session back up. The recipe we
+# replay is argv with the resume flag appended, so Fred's wrapper flags survive.
+RESUMABLE = {"claude", "codex"}
+# Plain TUI programs that are safe and useful to relaunch exactly as seen.
+REPLAYABLE = {
+    "nvim", "vim", "vi", "hx", "helix", "nano", "micro", "emacs",
+    "btop", "htop", "top", "lazygit", "lazydocker", "tmux", "zellij",
+    "yazi", "ranger", "nnn", "lf", "ssh", "mosh", "tail", "journalctl", "watch",
+}
+# GUI apps whose argv carries the project folder we want to keep (gtk-launch would lose it).
+GUI_ARGV_APPS = {"code", "code-oss", "codium", "cursor", "zed", "zeditor", "windsurf"}
+
+
+def child_pids(pid: int) -> list[int]:
+    try:
+        text = (Path("/proc") / str(pid) / "task" / str(pid) / "children").read_text()
+        return [int(part) for part in text.split()]
+    except (OSError, ValueError):
+        pass
+    result = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat_text = (entry / "stat").read_text()
+            parent = int(stat_text.rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        if parent == pid:
+            result.append(int(entry.name))
+    return result
+
+
+def proc_comm(pid: int) -> str:
+    try:
+        return (Path("/proc") / str(pid) / "comm").read_text().strip()
+    except OSError:
+        return ""
+
+
+def terminal_session(pid: int) -> dict[str, Any]:
+    """Find the shell under a terminal pid and whatever runs in its foreground.
+
+    Returns {"cwd": shell cwd, "command": argv or [], "program": basename or ""}.
+    """
+    session: dict[str, Any] = {"cwd": "", "command": [], "program": ""}
+    queue = [pid]
+    seen: set[int] = set()
+    shell_pid = 0
+    # Breadth-first through helpers (kitten etc.) until we hit a real shell.
+    while queue and not shell_pid:
+        current = queue.pop(0)
+        for child in child_pids(current):
+            if child in seen:
+                continue
+            seen.add(child)
+            comm = proc_comm(child)
+            if comm in SHELLS:
+                shell_pid = child
+                break
+            if comm in TERMINAL_HELPERS or not comm:
+                queue.append(child)
+    if not shell_pid:
+        return session
+    _exe, _argv, shell_cwd = process_info(shell_pid)
+    session["cwd"] = shell_cwd
+    # The foreground program is the shell's child (last started wins).
+    for child in reversed(child_pids(shell_pid)):
+        executable, argv, cwd = process_info(child)
+        comm = proc_comm(child)
+        if not argv or comm in SHELLS:
+            continue
+        program = Path(argv[0]).name
+        session.update({"command": argv, "program": program, "cwd": cwd or shell_cwd})
+        break
+    return session
+
+
+def resume_command(session: dict[str, Any]) -> list[str]:
+    """Turn a captured foreground program into something worth replaying, or []."""
+    argv = list(session.get("command") or [])
+    program = str(session.get("program") or "")
+    if not argv or not program:
+        return []
+    if program == "claude":
+        # --continue picks up the most recent conversation in this directory,
+        # so a Claude Code session really does come back as that session.
+        if not any(flag in argv for flag in ("--continue", "-c", "--resume", "-r")):
+            argv = argv + ["--continue"]
+        return argv
+    if program == "codex":
+        return ["codex", "resume", "--last"]
+    if program in REPLAYABLE:
+        return argv
+    return []
+
+
 def desktop_exec_binary(exec_line: str) -> str:
     """Return the executable token from a Desktop Entry Exec value."""
     try:
@@ -259,18 +366,27 @@ def find_desktop_entry(classes: list[str], executable: str, entries: list[dict[s
     return None
 
 
-def terminal_recipe(binary: str, cwd: str) -> list[str]:
+def terminal_recipe(binary: str, cwd: str, command: list[str] | None = None) -> list[str]:
+    """Launch a terminal in cwd, optionally running command inside it."""
+    # --hold & friends: when the program exits you get a shell prompt instead
+    # of the window vanishing (claude /exit should not take the terminal with it).
+    command = list(command or [])
     if binary == "ghostty":
-        return [binary, f"--working-directory={cwd}"] if cwd else [binary]
+        recipe = [binary, f"--working-directory={cwd}"] if cwd else [binary]
+        return recipe + ["--wait-after-command=true", "-e", *command] if command else recipe
     if binary == "kitty":
-        return [binary, "--directory", cwd] if cwd else [binary]
+        recipe = [binary, "--directory", cwd] if cwd else [binary]
+        return recipe + ["--hold", *command] if command else recipe
     if binary == "alacritty":
-        return [binary, "--working-directory", cwd] if cwd else [binary]
+        recipe = [binary, "--working-directory", cwd] if cwd else [binary]
+        return recipe + ["--hold", "-e", *command] if command else recipe
     if binary == "foot":
-        return [binary, "--working-directory", cwd] if cwd else [binary]
+        recipe = [binary, "--working-directory", cwd] if cwd else [binary]
+        return recipe + ["--hold", *command] if command else recipe
     if binary == "wezterm":
-        return [binary, "start", "--cwd", cwd] if cwd else [binary]
-    return [binary]
+        recipe = [binary, "start", "--cwd", cwd] if cwd else [binary, "start"]
+        return recipe + ["--", *command] if command else recipe
+    return [binary] + command
 
 
 def app_from_client(client: dict[str, Any], entries: list[dict[str, str]]) -> dict[str, Any] | None:
@@ -283,18 +399,31 @@ def app_from_client(client: dict[str, Any], entries: list[dict[str, str]]) -> di
         return None
 
     pid = int(client.get("pid") or 0)
-    executable, _argv, cwd = process_info(pid)
+    executable, argv, cwd = process_info(pid)
     terminal = next((TERMINALS[value] for value in lower_classes if value in TERMINALS), "")
     desktop = find_desktop_entry([app_class, initial_class], executable, entries)
+    command: list[str] = []
+    program = ""
 
     if terminal and shutil.which(terminal):
-        launch = terminal_recipe(terminal, cwd)
-        app_id = f"terminal:{terminal}:{cwd or 'home'}"
-        name = terminal.title()
+        session = terminal_session(pid)
+        cwd = session.get("cwd") or cwd
+        program = str(session.get("program") or "")
+        command = resume_command(session)
+        launch = terminal_recipe(terminal, cwd, command)
+        app_id = f"terminal:{terminal}:{cwd or 'home'}" + (f":{program}" if program else "")
+        name = terminal.title() + (f" · {program}" if program else "")
         kind = "terminal"
     elif desktop:
-        launch = ["gtk-launch", desktop["id"]]
-        app_id = f"desktop:{desktop['id']}"
+        exe_name = Path(executable).name if executable else ""
+        folder_args = [arg for arg in argv[1:] if arg and not arg.startswith("-") and Path(arg).is_dir()]
+        if exe_name in GUI_ARGV_APPS and folder_args:
+            # Keep the project folder the editor was opened on.
+            launch = [executable, *folder_args]
+            app_id = f"desktop:{desktop['id']}:{folder_args[0]}"
+        else:
+            launch = ["gtk-launch", desktop["id"]]
+            app_id = f"desktop:{desktop['id']}"
         name = desktop["name"]
         kind = "application"
     elif executable and os.access(executable, os.X_OK):
@@ -315,6 +444,9 @@ def app_from_client(client: dict[str, Any], entries: list[dict[str, str]]) -> di
         "launch": launch,
         "policy": "ensure" if global_app else "launch",
         "selected": not global_app,
+        "program": program,
+        "command": command,
+        "title": str(client.get("title") or ""),
     }
 
 
