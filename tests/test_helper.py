@@ -49,6 +49,26 @@ class RiftHelperTests(unittest.TestCase):
             saved = rift.save_rift("Empty", [])
         self.assertEqual(saved["apps"], [])
 
+    def test_save_replaces_existing_rift_association_on_workspace(self):
+        rift.ensure_dirs()
+        rift.atomic_json(
+            rift.RUNTIME_FILE,
+            {
+                "signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+                "open": {"old": {"workspace_id": 2, "workspace_name": "2"}},
+            },
+        )
+        with patch.object(rift, "current_apps", return_value=[]), patch.object(
+            rift, "current_workspace", return_value={"id": 2, "name": "2"}
+        ), patch.object(rift, "hypr_json", return_value=[{"id": 2}]):
+            rift.save_rift("New")
+
+        runtime = rift.read_json(rift.RUNTIME_FILE, {})
+        self.assertEqual(
+            runtime["open"],
+            {"new": {"workspace_id": 2, "workspace_name": "2"}},
+        )
+
     def test_open_existing_rift_focuses_without_relaunching(self):
         rift.ensure_dirs()
         rift.atomic_json(
