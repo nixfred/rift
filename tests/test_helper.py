@@ -545,6 +545,43 @@ class RiftHelperTests(unittest.TestCase):
         launch.assert_called_once_with(saved["apps"][1], saved)
         self.assertNotIn("failed_apps", runtime["open"]["nova"])
 
+    def test_open_rift_does_not_hold_runtime_lock_while_launching(self):
+        rift.ensure_dirs()
+        rift.atomic_json(
+            rift.rift_path("nova"),
+            {
+                "schemaVersion": 1,
+                "slug": "nova",
+                "name": "Nova",
+                "apps": [{"id": "editor", "launch": ["editor"]}],
+            },
+        )
+        entered = threading.Event()
+
+        def launch(_app, _saved):
+            def other():
+                with rift.runtime_transaction() as runtime:
+                    runtime["probe"] = True
+                entered.set()
+
+            worker = threading.Thread(target=other, daemon=True)
+            worker.start()
+            self.assertTrue(entered.wait(1.5), "runtime lock was still held while launching apps")
+            worker.join(timeout=1)
+            return {"app": "editor", "status": "launched"}
+
+        with patch.object(rift, "hypr_dispatch"), patch.object(
+            rift, "current_workspace", return_value={"id": 2, "name": "2"}
+        ), patch.object(
+            rift, "wait_for_workspace_change", return_value={"id": 9, "name": "9"}
+        ), patch.object(
+            rift, "hypr_json", return_value=[{"id": 9, "windows": 1}]
+        ), patch.object(rift, "launch_app_result", side_effect=launch):
+            result = rift.open_rift("nova")
+
+        self.assertEqual(result["action"], "opened")
+        self.assertEqual(rift.runtime_state()["open"]["nova"]["workspace_id"], 9)
+
     def test_partial_startup_does_not_write_completion_marker(self):
         rift.ensure_dirs()
         rift.atomic_json(
