@@ -756,7 +756,7 @@ def state_payload() -> dict[str, Any]:
     runtime = runtime_state()
     current_slug = ""
     for slug, association in runtime.get("open", {}).items():
-        if int(association.get("workspace_id", 0)) == int(workspace.get("id", 0)):
+        if numeric_id(association.get("workspace_id")) == numeric_id(workspace.get("id")):
             current_slug = slug
             break
     rifts = load_rifts()
@@ -767,8 +767,10 @@ def state_payload() -> dict[str, Any]:
     # Tell the panel where every open Rift lives so the entry view can say
     # "on workspace 7" and only offer Update when you are standing there.
     open_map = {slug: int(item.get("workspace_id", 0)) for slug, item in runtime.get("open", {}).items()}
+    failed_map = {slug: list(item.get("failed_apps") or []) for slug, item in runtime.get("open", {}).items()}
     for rift in rifts:
         rift["openWorkspace"] = open_map.get(rift.get("slug"), 0)
+        rift["failedApps"] = failed_map.get(rift.get("slug"), [])
     return {
         "workspace": {"id": workspace.get("id", 0), "name": workspace.get("name", "")},
         "apps": apps,
@@ -788,7 +790,7 @@ def save_rift(
 ) -> dict[str, Any]:
     slug = slugify(name)
     workspace = current_workspace()
-    workspace_id = int(workspace.get("id", 0))
+    workspace_id = numeric_id(workspace.get("id"))
     # The panel tells us which workspace it believed it was looking at. If the
     # user moved in the meantime, refuse rather than record the wrong workspace.
     if expect_workspace is not None and expect_workspace != workspace_id:
@@ -817,7 +819,7 @@ def save_rift(
         wanted = set(include_ids)
         apps = [app for app in apps if app["id"] in wanted]
     focused = current_workspace()
-    if int(focused.get("id", 0)) != workspace_id:
+    if numeric_id(focused.get("id")) != workspace_id:
         raise RuntimeError("Workspace changed while saving; try again")
     if not apps:
         raise ValueError("Open at least one application before saving this Rift")
@@ -925,11 +927,19 @@ def launch_app(app: dict[str, Any], rift: dict[str, Any]) -> bool:
     return launch_app_result(app, rift)["status"] == "launched"
 
 
+def numeric_id(value: Any) -> int:
+    """Coerce a Hyprland id to int. JSON null becomes 0 instead of TypeError."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def wait_for_workspace_change(previous_id: int, timeout: float = 2.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while True:
         workspace = current_workspace()
-        workspace_id = int(workspace.get("id", 0))
+        workspace_id = numeric_id(workspace.get("id"))
         if workspace_id > 0 and workspace_id != previous_id:
             return workspace
         if time.monotonic() >= deadline:
@@ -946,13 +956,13 @@ def focus_empty_workspace() -> dict[str, Any]:
     workspace — the exact place you press “start fresh”.
     """
     previous = current_workspace()
-    previous_id = int(previous.get("id", 0))
+    previous_id = numeric_id(previous.get("id"))
     hypr_dispatch("workspace", "emptyn")
     try:
         return wait_for_workspace_change(previous_id)
     except RuntimeError:
         focused = current_workspace()
-        if int(focused.get("id", 0) or 0) > 0 and int(focused.get("windows", 0) or 0) == 0:
+        if numeric_id(focused.get("id")) > 0 and numeric_id(focused.get("windows")) == 0:
             return focused
         raise
 
@@ -1029,7 +1039,7 @@ def new_workspace() -> dict[str, Any]:
 
 def persist_rift(rift: dict[str, Any]) -> dict[str, Any]:
     """Write a Rift definition, dropping derived fields that must not be stored."""
-    stored = {key: value for key, value in rift.items() if key not in ("validationErrors", "openWorkspace")}
+    stored = {key: value for key, value in rift.items() if key not in ("validationErrors", "openWorkspace", "failedApps")}
     atomic_json(rift_path(stored["slug"]), stored)
     return rift
 
