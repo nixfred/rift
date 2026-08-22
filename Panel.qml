@@ -168,6 +168,25 @@ Panel {
   function moveSelection(delta) {
     if (mode !== "browse" || rifts.length === 0) return
     selectedIndex = Math.max(0, Math.min(rifts.length - 1, selectedIndex + delta))
+    Qt.callLater(ensureSelectionVisible)
+  }
+
+  function ensureSelectionVisible() {
+    const item = riftRepeater.itemAt(selectedIndex)
+    if (!item) return
+
+    const top = item.mapToItem(contentColumn, 0, 0).y
+    const bottom = top + item.height
+    if (top < scroll.contentY)
+      scroll.contentY = top
+    else if (bottom > scroll.contentY + scroll.height)
+      scroll.contentY = Math.max(0, Math.min(scroll.contentHeight - scroll.height, bottom - scroll.height))
+  }
+
+  function switchPanel(direction) {
+    if (bar && barIdentity && typeof bar.switchPanelFrom === "function")
+      return bar.switchPanelFrom(barIdentity, direction)
+    return false
   }
 
   function activateSelection() {
@@ -273,6 +292,7 @@ Panel {
         else if (text === "s" || text === "S") root.beginSave(root.currentRift ? root.currentRift.name : "")
         else if ((text === "u" || text === "U") && root.currentRift) root.updateCurrent()
         else if ((text === "r" || text === "R") && root.currentRift && root.currentRift.previous) root.revertCurrent()
+        else if ((text === "t" || text === "T") && root.rifts.length > 0) root.toggleStartup(root.rifts[root.selectedIndex])
       }
 
       Flickable {
@@ -414,6 +434,7 @@ Panel {
             }
 
             Repeater {
+              id: riftRepeater
               model: root.rifts
 
               CursorSurface {
@@ -478,7 +499,7 @@ Panel {
                     id: startupButton
                     anchors.verticalCenter: parent.verticalCenter
                     iconText: modelData.startup ? "󰐥" : "󰒲"
-                    tooltipText: modelData.startup ? "Disable startup" : "Open at login"
+                    tooltipText: (modelData.startup ? "Disable startup" : "Open at login") + " · T"
                     foreground: root.foreground
                     hoverColor: root.foreground
                     onClicked: root.toggleStartup(modelData)

@@ -66,6 +66,7 @@ The panel is fully keyboard-driven, in the same `KeyboardPanel` style as Omarchy
 | `S` | Save the current workspace as a Rift (opens the app picker) |
 | `U` | One-click update the current Rift with what's on the workspace now |
 | `R` | Revert the current Rift to its previous recipe |
+| `T` | Toggle startup for the selected Rift |
 | `N` | New Rift from this workspace |
 | `Esc` | Close |
 | `Tab` / `Shift+Tab` | Switch to neighbouring bar popouts |
