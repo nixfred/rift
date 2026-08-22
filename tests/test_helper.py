@@ -454,6 +454,15 @@ class RiftHelperTests(unittest.TestCase):
             self.assertFalse(rift.rift_path("old").exists())
             self.assertEqual(rift.runtime_state()["open"]["shiny-new"]["workspace_id"], 4)
 
+    def test_rename_keeps_old_file_if_runtime_update_fails(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.rift_path("old"), {"schemaVersion": 1, "slug": "old", "name": "Old", "apps": []})
+        with patch.object(rift, "runtime_transaction", side_effect=RuntimeError("runtime locked")):
+            with self.assertRaisesRegex(RuntimeError, "runtime locked"):
+                rift.rename_rift("old", "Shiny New")
+        self.assertTrue(rift.rift_path("old").exists())
+        self.assertTrue(rift.rift_path("shiny-new").exists())
+
     def test_terminal_session_finds_shell_cwd_and_foreground_program(self):
         # kitty(100) -> kitten(101), bash(102), kitten(103); bash -> claude(200)
         tree = {100: [101, 102, 103], 102: [200]}
