@@ -332,9 +332,15 @@ def save_rift(name: str, include_ids: list[str] | None = None) -> dict[str, Any]
     }
     atomic_json(rift_path(slug), value)
     workspace = current_workspace()
+    workspace_id = int(workspace.get("id", 0))
     runtime = runtime_state()
+    runtime["open"] = {
+        open_slug: association
+        for open_slug, association in runtime.get("open", {}).items()
+        if open_slug == slug or int(association.get("workspace_id", 0)) != workspace_id
+    }
     runtime.setdefault("open", {})[slug] = {
-        "workspace_id": int(workspace.get("id", 0)),
+        "workspace_id": workspace_id,
         "workspace_name": str(workspace.get("name", "")),
     }
     save_runtime(runtime)
