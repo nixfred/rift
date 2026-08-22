@@ -11,7 +11,7 @@ Panel {
   ipcTarget: "nixfred.rift"
   manageIpc: false
 
-  readonly property string riftVersion: "0.3.4"  // keep in lockstep with manifest.json (tests enforce)
+  readonly property string riftVersion: "0.3.5"  // keep in lockstep with manifest.json (tests enforce)
   property var anchorItem: null
   property var hostWidget: null
   property string helperPath: ""
@@ -361,6 +361,9 @@ Panel {
             root.refresh()
           } else if (response.data.action === "focused") {
             root.notify("Rift focused", "Switched to workspace " + response.data.workspace + ".")
+            root.close()
+          } else if (response.data.action === "repaired") {
+            root.notify("Rift repaired", response.data.launched + " missing application" + (response.data.launched === 1 ? "" : "s") + " relaunched on workspace " + response.data.workspace + ".")
             root.close()
           } else if (response.data.action === "partial") {
             root.notify("Rift partially opened", response.data.launched + " launched · " + response.data.failed + " failed on workspace " + response.data.workspace + ".")
