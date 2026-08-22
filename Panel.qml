@@ -11,7 +11,7 @@ Panel {
   ipcTarget: "nixfred.rift"
   manageIpc: false
 
-  readonly property string riftVersion: "0.3.2"  // keep in lockstep with manifest.json (tests enforce)
+  readonly property string riftVersion: "0.3.3"  // keep in lockstep with manifest.json (tests enforce)
   property var anchorItem: null
   property var hostWidget: null
   property string helperPath: ""
@@ -19,6 +19,9 @@ Panel {
   property string mode: "browse"          // browse | new | detail | save
   property string detailSlug: ""
   property bool confirmDelete: false
+  // Last open/retry outcome, shown inside the entry so partial failures are
+  // visible and retryable instead of vanishing into a notification.
+  property var lastOpen: null
   property int selectedIndex: 0
   property var includedApps: ({})
   property string statusText: ""
@@ -97,6 +100,12 @@ Panel {
     mode = "browse"
     statusText = ""
     errorText = ""
+    confirmDelete = false
+    // Start the cursor on the Rift you're standing on (or the top), not where
+    // the arrow keys left it last time.
+    var startIndex = 0
+    for (var i = 0; i < rifts.length; i++) if (rifts[i].slug === stateData.currentRift) startIndex = i
+    selectedIndex = startIndex
     stateStale = true
     refresh()
     controller.show()
@@ -191,10 +200,23 @@ Panel {
   }
 
   function openDetail(slug) {
+    if (detailSlug !== slug) lastOpen = null
     detailSlug = slug
     confirmDelete = false
     errorText = ""
     mode = "detail"
+  }
+
+  function resultIcon(status) {
+    if (status === "launched") return "󰄬"
+    if (status === "already-running") return "󰑖"
+    return "󰅖"
+  }
+
+  function resultLabel(status) {
+    if (status === "launched") return "launched"
+    if (status === "already-running") return "already running"
+    return "failed"
   }
 
   function backToBrowse() {
@@ -304,16 +326,19 @@ Panel {
         var response = JSON.parse(root.actionOutput)
         if (!response.ok) throw new Error(response.error || "Rift action failed")
         if (root.pendingAction === "open") {
+          root.lastOpen = response.data
           if (response.data.action === "failed") {
-            root.errorText = "No applications could be launched. Fix the saved recipes or try again."
+            root.errorText = "No applications could be launched — see each app below, fix the recipe or retry."
             root.notify("Rift could not open", response.data.failed + " application" + (response.data.failed === 1 ? " needs" : "s need") + " attention.")
+            root.openDetail(response.data.rift)
             root.refresh()
           } else if (response.data.action === "focused") {
             root.notify("Rift focused", "Switched to workspace " + response.data.workspace + ".")
             root.close()
           } else if (response.data.action === "partial") {
             root.notify("Rift partially opened", response.data.launched + " launched · " + response.data.failed + " failed on workspace " + response.data.workspace + ".")
-            root.close()
+            root.openDetail(response.data.rift)
+            root.refresh()
           } else {
             root.notify("Rift opened", response.data.launched + " application" + (response.data.launched === 1 ? " is" : "s are") + " launching on workspace " + response.data.workspace + ".")
             root.close()
@@ -758,7 +783,7 @@ Panel {
                   font.pixelSize: Style.font.caption
                 }
                 Text {
-                  visible: modelData.command && modelData.command.length > 0
+                  visible: !!(modelData.command && modelData.command.length > 0)
                   width: parent.width
                   text: "      ⟳ " + (modelData.command ? modelData.command.join(" ") : "")
                   elide: Text.ElideMiddle
@@ -772,12 +797,64 @@ Panel {
 
             Rectangle { width: parent.width; height: 1; color: root.dim; opacity: 0.28 }
 
+            // ---- Last open / retry outcome, per app
+            Column {
+              visible: root.lastOpen !== null && root.lastOpen.rift === root.detailSlug && root.lastOpen.results !== undefined
+              width: parent.width
+              spacing: Style.space(3)
+
+              Text {
+                text: root.lastOpen
+                  ? (root.lastOpen.action === "failed" ? "COULD NOT OPEN"
+                     : root.lastOpen.action === "partial" ? "PARTIALLY OPENED · workspace " + root.lastOpen.workspace
+                     : "OPENED · workspace " + root.lastOpen.workspace)
+                  : ""
+                color: root.lastOpen && root.lastOpen.action !== "opened" ? root.urgent : root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1.1
+              }
+
+              Repeater {
+                model: root.lastOpen && root.lastOpen.results ? root.lastOpen.results : []
+                Text {
+                  width: parent.width
+                  text: "  " + root.resultIcon(modelData.status) + " " + modelData.app.replace(/^(terminal|desktop|exec):/, "")
+                    + " · " + root.resultLabel(modelData.status)
+                    + (modelData.error ? " — " + modelData.error : "")
+                  elide: Text.ElideMiddle
+                  color: modelData.status === "failed" ? root.urgent : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+            }
+
+            Text {
+              visible: root.detailRift && root.detailRift.failedApps && root.detailRift.failedApps.length > 0
+                && !(root.lastOpen && root.lastOpen.rift === root.detailSlug)
+              width: parent.width
+              text: root.detailRift && root.detailRift.failedApps
+                ? root.detailRift.failedApps.length + " application" + (root.detailRift.failedApps.length === 1 ? "" : "s") + " failed last time — Open retries just those."
+                : ""
+              wrapMode: Text.WordWrap
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
             Button {
               width: parent.width
-              text: root.detailRift && root.detailRift.openWorkspace > 0
-                ? "Go to workspace " + root.detailRift.openWorkspace
-                : "Open on a fresh workspace"
-              iconText: root.detailRift && root.detailRift.openWorkspace > 0 ? "󰁔" : "󰐊"
+              text: root.detailRift && root.detailRift.failedApps && root.detailRift.failedApps.length > 0
+                ? "Retry " + root.detailRift.failedApps.length + " failed app" + (root.detailRift.failedApps.length === 1 ? "" : "s") + " on workspace " + root.detailRift.openWorkspace
+                : root.lastOpen && root.lastOpen.rift === root.detailSlug && root.lastOpen.action === "failed"
+                  ? "Try again on a fresh workspace"
+                  : root.detailRift && root.detailRift.openWorkspace > 0
+                    ? "Go to workspace " + root.detailRift.openWorkspace
+                    : "Open on a fresh workspace"
+              iconText: root.detailRift && root.detailRift.failedApps && root.detailRift.failedApps.length > 0 ? "󰑐"
+                : root.detailRift && root.detailRift.openWorkspace > 0 ? "󰁔" : "󰐊"
               leftAlign: true
               foreground: root.foreground
               active: true

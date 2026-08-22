@@ -763,8 +763,10 @@ def state_payload() -> dict[str, Any]:
     # Tell the panel where every open Rift lives so the entry view can say
     # "on workspace 7" and only offer Update when you are standing there.
     open_map = {slug: int(item.get("workspace_id", 0)) for slug, item in runtime.get("open", {}).items()}
+    failed_map = {slug: list(item.get("failed_apps") or []) for slug, item in runtime.get("open", {}).items()}
     for rift in rifts:
         rift["openWorkspace"] = open_map.get(rift.get("slug"), 0)
+        rift["failedApps"] = failed_map.get(rift.get("slug"), [])
     return {
         "workspace": {"id": workspace.get("id", 0), "name": workspace.get("name", "")},
         "apps": apps,
@@ -1033,7 +1035,7 @@ def new_workspace() -> dict[str, Any]:
 
 def persist_rift(rift: dict[str, Any]) -> dict[str, Any]:
     """Write a Rift definition, dropping derived fields that must not be stored."""
-    stored = {key: value for key, value in rift.items() if key not in ("validationErrors", "openWorkspace")}
+    stored = {key: value for key, value in rift.items() if key not in ("validationErrors", "openWorkspace", "failedApps")}
     atomic_json(rift_path(stored["slug"]), stored)
     return rift
 
