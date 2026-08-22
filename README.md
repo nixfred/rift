@@ -104,6 +104,15 @@ git clone https://github.com/nixfred/rift.git ~/.config/omarchy/plugins/nixfred.
 omarchy plugin enable nixfred.rift
 ```
 
+### Uninstall
+
+```bash
+omarchy plugin remove nixfred.rift          # disables + removes the plugin dir
+rm -rf ~/.config/rift ~/.local/state/rift   # your Rift definitions + runtime state (optional)
+```
+
+Rift runs no daemon and installs nothing outside those two directories and the plugin folder.
+
 ### Requirements
 
 - Omarchy with the Quickshell bar (plugin `schemaVersion: 1`)
