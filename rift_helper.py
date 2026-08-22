@@ -947,6 +947,18 @@ def wait_for_workspace_change(previous_id: int, timeout: float = 2.0) -> dict[st
         time.sleep(0.05)
 
 
+def wait_for_workspace(target_id: int, timeout: float = 2.0) -> dict[str, Any]:
+    """Wait until Hyprland focuses a specific workspace before launching into it."""
+    deadline = time.monotonic() + timeout
+    while True:
+        workspace = current_workspace()
+        if int(workspace.get("id", 0) or 0) == target_id:
+            return workspace
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Timed out waiting for workspace {target_id}")
+        time.sleep(0.05)
+
+
 def focus_empty_workspace() -> dict[str, Any]:
     """Switch to Hyprland's next empty workspace.
 
@@ -975,6 +987,7 @@ def open_rift(slug: str) -> dict[str, Any]:
         hypr_dispatch("workspace", str(association["workspace_id"]))
         pending = set(association.get("failed_apps", []))
         if pending:
+            wait_for_workspace(int(association["workspace_id"]))
             retry_apps = [app for app in rift.get("apps", []) if str(app.get("id", "")) in pending]
             results = [launch_app_result(app, rift) for app in retry_apps]
             remaining = [result["app"] for result in results if result["status"] == "failed"]
