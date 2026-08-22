@@ -561,6 +561,11 @@ def save_rift(
                 f"{name} belongs to {where}, not workspace {workspace_id}. "
                 "Save this workspace as a new Rift instead."
             )
+    if rift_path(slug).exists() and (update_of is None or slugify(update_of) != slug):
+        raise RuntimeError(
+            f"A Rift named {name.strip()} already exists. "
+            "Update it from its own workspace, or choose a different name."
+        )
     apps = current_apps(workspace)
     if include_ids is None:
         apps = [app for app in apps if app.get("selected", True)]
