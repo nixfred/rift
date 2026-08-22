@@ -357,12 +357,17 @@ class RiftHelperTests(unittest.TestCase):
         tree = {100: [101, 102, 103], 102: [200]}
         comm = {101: "kitten", 102: "bash", 103: "kitten", 200: "claude"}
         info = {
+            100: ("/usr/bin/kitty", ["kitty"], "/home/pi"),
             102: ("/usr/bin/bash", ["bash"], "/home/pi/Projects/rift"),
             200: ("/usr/bin/node", ["claude", "--append-system-prompt-file", "/x/LARRY.md", "--dangerously-skip-permissions"], "/home/pi/Projects/rift"),
         }
+        # bash pgrp 102, foreground pgroup is claude (200)
+        ids = {102: (100, 102, 200), 200: (102, 200, 200)}
         with patch.object(rift, "child_pids", side_effect=lambda pid: tree.get(pid, [])), patch.object(
             rift, "proc_comm", side_effect=lambda pid: comm.get(pid, "")
-        ), patch.object(rift, "process_info", side_effect=lambda pid: info.get(pid, ("", [], ""))):
+        ), patch.object(rift, "process_info", side_effect=lambda pid: info.get(pid, ("", [], ""))), patch.object(
+            rift, "proc_ids", side_effect=lambda pid: ids.get(pid)
+        ):
             session = rift.terminal_session(100)
         self.assertEqual(session["cwd"], "/home/pi/Projects/rift")
         self.assertEqual(session["program"], "claude")
@@ -373,6 +378,42 @@ class RiftHelperTests(unittest.TestCase):
             rift.terminal_recipe("kitty", "/home/pi/Projects/rift", resumed)[:3],
             ["kitty", "--directory", "/home/pi/Projects/rift"],
         )
+
+    def test_terminal_session_ignores_background_jobs_listed_after_the_shell(self):
+        # /proc children order is not start order. reversed() used to pick sleep.
+        tree = {100: [10], 10: [12, 11]}
+        comm = {10: "zsh", 11: "sleep", 12: "claude"}
+        info = {
+            10: ("/bin/zsh", ["zsh"], "/work"),
+            11: ("/bin/sleep", ["sleep", "100"], "/work"),
+            12: ("/usr/bin/claude", ["claude"], "/work"),
+        }
+        ids = {10: (100, 10, 12), 11: (10, 11, 12), 12: (10, 12, 12)}
+        with patch.object(rift, "child_pids", side_effect=lambda pid: tree.get(pid, [])), patch.object(
+            rift, "proc_comm", side_effect=lambda pid: comm.get(pid, "")
+        ), patch.object(rift, "process_info", side_effect=lambda pid: info.get(pid, ("", [], ""))), patch.object(
+            rift, "proc_ids", side_effect=lambda pid: ids.get(pid)
+        ):
+            session = rift.terminal_session(100)
+        self.assertEqual(session["program"], "claude")
+        self.assertEqual(session["command"], ["claude"])
+
+    def test_terminal_session_captures_direct_minus_e_without_a_shell(self):
+        tree = {100: [200]}
+        comm = {200: "claude"}
+        info = {
+            100: ("/usr/bin/kitty", ["kitty", "-e", "claude"], "/home/pi"),
+            200: ("/usr/bin/claude", ["claude"], "/proj"),
+        }
+        ids = {100: (1, 100, 200), 200: (100, 200, 200)}
+        with patch.object(rift, "child_pids", side_effect=lambda pid: tree.get(pid, [])), patch.object(
+            rift, "proc_comm", side_effect=lambda pid: comm.get(pid, "")
+        ), patch.object(rift, "process_info", side_effect=lambda pid: info.get(pid, ("", [], ""))), patch.object(
+            rift, "proc_ids", side_effect=lambda pid: ids.get(pid)
+        ):
+            session = rift.terminal_session(100)
+        self.assertEqual(session["program"], "claude")
+        self.assertEqual(session["cwd"], "/proj")
 
     def test_resume_command_policy(self):
         self.assertEqual(rift.resume_command({"command": ["codex", "--yolo"], "program": "codex"}), ["codex", "resume", "--last"])
