@@ -763,6 +763,24 @@ class RiftHelperTests(unittest.TestCase):
             _exe, _argv, cwd = rift.process_info(123)
         self.assertEqual(cwd, "")
 
+    def test_codex_resume_binds_to_the_session_for_this_directory(self):
+        home = Path(self.temp.name) / "codex"
+        day = home / "sessions" / "2026" / "08" / "21"
+        day.mkdir(parents=True)
+        def write(name, cwd, stamp, sid):
+            (day / name).write_text(rift.json.dumps({"type": "session_meta", "payload": {"cwd": cwd, "timestamp": stamp, "session_id": sid}}) + "\n{\"type\":\"x\"}\n")
+        write("rollout-a.jsonl", "/p/one", "2026-08-21T01:00:00Z", "old-one")
+        write("rollout-b.jsonl", "/p/one", "2026-08-21T02:00:00Z", "new-one")
+        write("rollout-c.jsonl", "/p/two", "2026-08-21T03:00:00Z", "global-last")
+        with patch.object(rift, "CODEX_HOME", home):
+            self.assertEqual(rift.codex_session_for("/p/one"), "new-one")
+            self.assertEqual(rift.resolve_launch(["kitty", "--hold", "codex", "resume", "--last"], "/p/one"),
+                             ["kitty", "--hold", "codex", "resume", "new-one"])
+            # no session for this directory → fresh codex here, never someone else's last
+            self.assertEqual(rift.resolve_launch(["kitty", "--hold", "codex", "resume", "--last"], "/p/none"),
+                             ["kitty", "--hold", "codex"])
+            self.assertEqual(rift.resolve_launch(["kitty", "claude", "--continue"], "/p/one"), ["kitty", "claude", "--continue"])
+
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(
             rift.terminal_recipe("ghostty", "/tmp/nova"),
