@@ -126,7 +126,10 @@ def hypr_json(subject: str) -> Any:
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"hyprctl {subject} failed")
-    return json.loads(result.stdout)
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"hyprctl {subject} returned invalid JSON") from error
 
 
 def lua_dispatch(dispatcher: str, argument: str) -> str:
@@ -193,6 +196,25 @@ TERMINAL_HELPERS = {"kitten", "ghostty", "alacritty", "foot", "wezterm-gui", "we
 # Programs that know how to pick their own session back up. The recipe we
 # replay is argv with the resume flag appended, so Fred's wrapper flags survive.
 RESUMABLE = {"claude", "codex"}
+# `claude [options] [command] [prompt]` — these positionals are admin CLIs,
+# not an interactive coding session. Replaying them with --continue is wrong.
+CLAUDE_SUBCOMMANDS = {
+    "agents",
+    "auth",
+    "auto-mode",
+    "doctor",
+    "gateway",
+    "import",
+    "install",
+    "mcp",
+    "plugin",
+    "plugins",
+    "project",
+    "setup-token",
+    "ultrareview",
+    "update",
+    "upgrade",
+}
 # Plain TUI programs that are safe and useful to relaunch exactly as seen.
 REPLAYABLE = {
     "nvim", "vim", "vi", "hx", "helix", "nano", "micro", "emacs",
@@ -301,6 +323,17 @@ def resume_command(session: dict[str, Any]) -> list[str]:
     if not argv or not program:
         return []
     if program == "claude":
+        # Print/SDK mode and admin subcommands are not sessions to resume.
+        if any(token in {"-p", "--print"} for token in argv):
+            return []
+        for token in argv[1:]:
+            if token == "--":
+                break
+            if token.startswith("-"):
+                continue
+            if token in CLAUDE_SUBCOMMANDS:
+                return []
+            break
         # --continue picks up the most recent conversation in this directory,
         # so a Claude Code session really does come back as that session.
         if not any(flag in argv for flag in ("--continue", "-c", "--resume", "-r")):
@@ -600,10 +633,14 @@ def normalized_runtime_state(value: Any, signature: str) -> dict[str, Any]:
             continue
         if workspace_id <= 0:
             continue
-        valid[slug] = {
+        normalized = {
             "workspace_id": workspace_id,
             "workspace_name": str(association.get("workspace_name", "")),
         }
+        failed_apps = association.get("failed_apps")
+        if isinstance(failed_apps, list):
+            normalized["failed_apps"] = [item for item in failed_apps if isinstance(item, str) and item]
+        valid[slug] = normalized
     return {"signature": signature, "open": valid}
 
 
@@ -796,23 +833,37 @@ def save_rift(
     return value
 
 
-def app_is_running(app: dict[str, Any]) -> bool:
+def app_running_state(app: dict[str, Any]) -> str:
     wanted = str(app.get("class", "")).casefold()
     if not wanted:
-        return False
+        return "absent"
     try:
-        return any(
+        running = any(
             wanted in {str(client.get("class", "")).casefold(), str(client.get("initialClass", "")).casefold()}
             for client in hypr_json("clients")
         )
     except Exception:
-        return False
+        return "unknown"
+    return "present" if running else "absent"
+
+
+def app_is_running(app: dict[str, Any]) -> bool:
+    return app_running_state(app) == "present"
 
 
 def launch_app_result(app: dict[str, Any], rift: dict[str, Any]) -> dict[str, str]:
     identity = str(app.get("id") or app.get("name") or "unknown")
-    if app.get("policy") == "ensure" and app_is_running(app):
-        return {"app": identity, "status": "already-running"}
+    if app.get("policy") == "ensure":
+        running_state = app_running_state(app)
+        if running_state == "present":
+            return {"app": identity, "status": "already-running"}
+        if running_state == "unknown":
+            return {
+                "app": identity,
+                "status": "failed",
+                "reason": "state-unknown",
+                "error": "Could not verify whether this application is already running",
+            }
     argv = app.get("launch") or []
     if not isinstance(argv, list) or not argv:
         return {"app": identity, "status": "failed", "error": "Invalid launch recipe"}

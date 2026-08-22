@@ -171,6 +171,25 @@ class RiftHelperTests(unittest.TestCase):
                 with patch.object(rift, "hypr_json", return_value=[]):
                     self.assertEqual(rift.runtime_state(), {"signature": signature, "open": {}})
 
+    def test_runtime_state_preserves_valid_failed_app_ids(self):
+        signature = rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+        rift.atomic_json(
+            rift.RUNTIME_FILE,
+            {
+                "signature": signature,
+                "open": {
+                    "nova": {
+                        "workspace_id": 7,
+                        "workspace_name": "7",
+                        "failed_apps": ["desktop:slack", "", 42],
+                    }
+                },
+            },
+        )
+        with patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}]):
+            state = rift.runtime_state()
+        self.assertEqual(state["open"]["nova"]["failed_apps"], ["desktop:slack"])
+
     def test_load_rifts_skips_invalid_files_and_app_recipes(self):
         rift.ensure_dirs()
         rift.atomic_json(rift.RIFTS_ROOT / "wrong-name.json", {
@@ -217,6 +236,32 @@ class RiftHelperTests(unittest.TestCase):
         with patch.object(rift, "_hyprctl_dispatch", side_effect=fake):
             rift.hypr_dispatch("workspace", "3")
         self.assertEqual(calls, [["hl.dsp.focus({ workspace = 3 })"], ["workspace", "3"]])
+
+    def test_hypr_json_treats_empty_or_invalid_stdout_as_runtime_error(self):
+        import subprocess as sp
+
+        with patch.object(
+            rift.subprocess,
+            "run",
+            return_value=sp.CompletedProcess(["hyprctl", "-j", "clients"], 0, "", ""),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
+                rift.hypr_json("clients")
+
+        with patch.object(
+            rift.subprocess,
+            "run",
+            return_value=sp.CompletedProcess(["hyprctl", "-j", "clients"], 0, "not-json", ""),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
+                rift.hypr_json("clients")
+
+        with patch.object(
+            rift.subprocess,
+            "run",
+            return_value=sp.CompletedProcess(["hyprctl", "-j", "clients"], 0, "[]", ""),
+        ):
+            self.assertEqual(rift.hypr_json("clients"), [])
 
     def test_wait_for_workspace_change_handles_delayed_transition(self):
         with patch.object(
@@ -478,6 +523,21 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(rift.resume_command({"command": ["python3", "-m", "http.server"], "program": "python3"}), [])
         self.assertEqual(rift.resume_command({"command": [], "program": ""}), [])
         self.assertEqual(rift.resume_command({"command": ["claude", "--continue"], "program": "claude"}), ["claude", "--continue"])
+        self.assertEqual(
+            rift.resume_command({"command": ["claude", "--dangerously-skip-permissions"], "program": "claude"}),
+            ["claude", "--dangerously-skip-permissions", "--continue"],
+        )
+        self.assertEqual(rift.resume_command({"command": ["claude", "mcp"], "program": "claude"}), [])
+        self.assertEqual(rift.resume_command({"command": ["claude", "doctor"], "program": "claude"}), [])
+        self.assertEqual(rift.resume_command({"command": ["claude", "-p", "hello"], "program": "claude"}), [])
+        self.assertEqual(rift.resume_command({"command": ["claude", "--print"], "program": "claude"}), [])
+        self.assertEqual(
+            rift.resume_command({
+                "command": ["claude", "--append-system-prompt-file", "/x/LARRY.md", "--dangerously-skip-permissions"],
+                "program": "claude",
+            }),
+            ["claude", "--append-system-prompt-file", "/x/LARRY.md", "--dangerously-skip-permissions", "--continue"],
+        )
 
     def test_terminal_recipe_runs_command_per_terminal(self):
         self.assertEqual(rift.terminal_recipe("ghostty", "/p", ["btop"]), ["ghostty", "--working-directory=/p", "--wait-after-command=true", "-e", "btop"])
@@ -581,6 +641,49 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(launched, [False, True])
         self.assertEqual(popen.call_count, 2)
 
+    def test_ensure_app_does_not_launch_when_client_state_is_unknown(self):
+        app = {
+            "id": "desktop:slack",
+            "class": "Slack",
+            "policy": "ensure",
+            "launch": ["gtk-launch", "slack"],
+        }
+        with patch.object(rift, "hypr_json", side_effect=RuntimeError("Hyprland busy")), patch.object(
+            rift.subprocess, "Popen"
+        ) as popen:
+            result = rift.launch_app_result(app, {"name": "Work", "slug": "work"})
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["reason"], "state-unknown")
+        popen.assert_not_called()
+
+    def test_ensure_app_launches_only_after_confirmed_absence(self):
+        app = {
+            "id": "desktop:slack",
+            "class": "Slack",
+            "policy": "ensure",
+            "launch": ["gtk-launch", "slack"],
+        }
+        with patch.object(rift, "hypr_json", return_value=[]), patch.object(rift.subprocess, "Popen") as popen:
+            result = rift.launch_app_result(app, {"name": "Work", "slug": "work"})
+        self.assertEqual(result["status"], "launched")
+        popen.assert_called_once()
+
+    def test_ensure_app_reports_existing_client_without_launching(self):
+        app = {
+            "id": "desktop:slack",
+            "class": "Slack",
+            "policy": "ensure",
+            "launch": ["gtk-launch", "slack"],
+        }
+        clients = [{"class": "slack", "initialClass": "Slack"}]
+        with patch.object(rift, "hypr_json", return_value=clients), patch.object(
+            rift.subprocess, "Popen"
+        ) as popen:
+            result = rift.launch_app_result(app, {"name": "Work", "slug": "work"})
+        self.assertEqual(result["status"], "already-running")
+        popen.assert_not_called()
+
     def test_open_rift_keeps_total_failure_retryable(self):
         saved = {"slug": "nova", "name": "Nova", "apps": [{"id": "missing"}]}
         runtime = {"signature": "", "open": {}}
@@ -683,9 +786,10 @@ class RiftHelperTests(unittest.TestCase):
             rift, "hypr_json", return_value=[{"id": 9, "windows": 1}]
         ), patch.object(rift, "launch_app_result", side_effect=launch):
             result = rift.open_rift("nova")
-
-        self.assertEqual(result["action"], "opened")
-        self.assertEqual(rift.runtime_state()["open"]["nova"]["workspace_id"], 9)
+            # Assert while hypr_json is still patched: outside the block the
+            # liveness rule consults the REAL compositor and prunes workspace 9.
+            self.assertEqual(result["action"], "opened")
+            self.assertEqual(rift.runtime_state()["open"]["nova"]["workspace_id"], 9)
 
     def test_partial_startup_does_not_write_completion_marker(self):
         rift.ensure_dirs()
