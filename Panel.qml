@@ -100,6 +100,12 @@ Panel {
     mode = "browse"
     statusText = ""
     errorText = ""
+    confirmDelete = false
+    // Start the cursor on the Rift you're standing on (or the top), not where
+    // the arrow keys left it last time.
+    var startIndex = 0
+    for (var i = 0; i < rifts.length; i++) if (rifts[i].slug === stateData.currentRift) startIndex = i
+    selectedIndex = startIndex
     stateStale = true
     refresh()
     controller.show()
@@ -777,7 +783,7 @@ Panel {
                   font.pixelSize: Style.font.caption
                 }
                 Text {
-                  visible: modelData.command && modelData.command.length > 0
+                  visible: !!(modelData.command && modelData.command.length > 0)
                   width: parent.width
                   text: "      ⟳ " + (modelData.command ? modelData.command.join(" ") : "")
                   elide: Text.ElideMiddle
