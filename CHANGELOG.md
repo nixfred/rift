@@ -2,6 +2,11 @@
 
 All notable changes to Rift. The version shown in the panel header (`RIFTS vX.Y.Z`) and bar tooltip is the one in `manifest.json`; tests keep them in lockstep.
 
+## v0.3.8 — 2026-08-22 · Grok is a first-class coding AI
+
+- Programs running under an interpreter (`node …/@xai-official/grok/bin/grok --yolo`, bun/deno/python scripts) are captured as the script they are (`grok`) when that name is on PATH, and replayed as the user-facing command
+- **Grok resumes**: `grok … --continue` (most recent session for that directory), same contract as Claude Code. Fred's three coding AIs — Claude Code, Codex, Grok — all come back with their working directory
+
 ## v0.3.7 — 2026-08-22 · Codex resumes the right session
 
 - `codex resume --last` is the *global* last session (thanks Grok for flagging it). Rift now late-binds at launch: it scans `~/.codex/sessions/**` for the newest session whose `cwd` is the app's directory and runs `codex resume <id>`; with no session for that directory it starts Codex fresh there — never some other project's session. Saved recipes are unchanged

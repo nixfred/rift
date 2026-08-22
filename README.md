@@ -11,7 +11,7 @@
 [![Omarchy plugin](https://img.shields.io/badge/Omarchy-bar%20plugin-9d7cd8?style=for-the-badge&logo=archlinux&logoColor=white)](https://omarchy.org)
 [![Hyprland](https://img.shields.io/badge/Hyprland-native-58e1ff?style=for-the-badge)](https://hypr.land)
 [![Zero deps](https://img.shields.io/badge/deps-python3%20%2B%20hyprctl-success?style=for-the-badge)](#requirements)
-[![Version](https://img.shields.io/badge/version-0.3.7-8b5cf6?style=for-the-badge)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.8-8b5cf6?style=for-the-badge)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 
 ```bash
@@ -51,6 +51,7 @@ Honesty section — this is the whole product, so here's exactly what is and isn
 |---|---|---|
 | **Terminal** (Ghostty, Kitty, Alacritty, Foot, WezTerm) | the **shell's real working directory** (not the terminal's), and the **program in the foreground** | terminal relaunched in that directory, `--hold` so it stays open |
 | **Claude Code** running in a terminal | its full argv (your wrapper flags survive) | `claude … --continue` — resumes the most recent conversation in that directory. **Yes, your Claude session comes back.** |
+| **Grok** (xAI CLI) in a terminal | its argv, seen through the `node …/bin/grok` wrapper | `grok … --continue` — most recent session for that directory |
 | **Codex** in a terminal | that it was Codex, and the directory | `codex resume <id>` of the newest Codex session **for that directory** (looked up in `~/.codex/sessions` at launch); fresh `codex` if none |
 | `nvim`, `hx`, `btop`, `lazygit`, `ssh host`, `tmux`, `yazi`… | argv | replayed as-is |
 | any other foreground command | recorded (shown in the entry) but **not replayed** — you get the shell in the right directory | — |

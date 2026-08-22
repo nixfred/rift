@@ -197,7 +197,10 @@ SHELLS = {"bash", "zsh", "fish", "sh", "dash", "nu", "nushell", "elvish", "xonsh
 TERMINAL_HELPERS = {"kitten", "ghostty", "alacritty", "foot", "wezterm-gui", "wezterm", "kitty"}
 # Programs that know how to pick their own session back up. The recipe we
 # replay is argv with the resume flag appended, so Fred's wrapper flags survive.
-RESUMABLE = {"claude", "codex"}
+RESUMABLE = {"claude", "codex", "grok"}
+# Coding AIs and other CLIs often run as `node …/bin/grok --yolo`; the real
+# program is the script, and it is on PATH under that name. See through it.
+INTERPRETERS = {"node", "nodejs", "bun", "deno", "python", "python3", "uv", "npx", "bunx"}
 # `claude [options] [command] [prompt]` — these positionals are admin CLIs,
 # not an interactive coding session. Replaying them with --continue is wrong.
 CLAUDE_SUBCOMMANDS = {
@@ -285,12 +288,31 @@ def proc_ids(pid: int) -> tuple[int, int, int] | None:
         return None
 
 
+def unwrap_interpreter(argv: list[str]) -> tuple[str, list[str]]:
+    """('grok', ['grok', '--yolo']) for ['node', '/…/@xai-official/grok/bin/grok', '--yolo'].
+
+    Only rewrites argv when the script's basename is itself on PATH, so the
+    replayed recipe is the user-facing command and survives version bumps.
+    """
+    if not argv:
+        return "", argv
+    head = Path(argv[0]).name
+    if head.startswith("python") and head not in INTERPRETERS:
+        head = "python"
+    if head in INTERPRETERS and len(argv) > 1 and not argv[1].startswith("-"):
+        script = Path(argv[1]).name
+        if script and shutil.which(script):
+            return script, [script, *argv[2:]]
+        return script or head, argv
+    return Path(argv[0]).name, argv
+
+
 def capture_program(pid: int, fallback_cwd: str) -> dict[str, Any] | None:
     _executable, argv, cwd = process_info(pid)
     comm = proc_comm(pid)
     if not argv or comm in SHELLS or comm in TERMINAL_HELPERS:
         return None
-    program = Path(argv[0]).name
+    program, argv = unwrap_interpreter(argv)
     if program in SHELLS or program in TERMINAL_HELPERS:
         return None
     return {"command": argv, "program": program, "cwd": cwd or fallback_cwd}
@@ -374,6 +396,11 @@ def resume_command(session: dict[str, Any]) -> list[str]:
             break
         # --continue picks up the most recent conversation in this directory,
         # so a Claude Code session really does come back as that session.
+        if not any(flag in argv for flag in ("--continue", "-c", "--resume", "-r")):
+            argv = argv + ["--continue"]
+        return argv
+    if program == "grok":
+        # grok -c / --continue: most recent session for the current working directory.
         if not any(flag in argv for flag in ("--continue", "-c", "--resume", "-r")):
             argv = argv + ["--continue"]
         return argv
