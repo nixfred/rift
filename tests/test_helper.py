@@ -1,6 +1,7 @@
 import importlib.util
 import tempfile
 import threading
+import time
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -63,6 +64,33 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertIn(rift.read_json(destination, {})["writer"], range(12))
         self.assertEqual(list(destination.parent.glob("*.tmp")), [])
+
+    def test_runtime_transaction_preserves_concurrent_mutations(self):
+        barrier = threading.Barrier(8)
+        failures = []
+
+        def associate(workspace_id):
+            try:
+                barrier.wait()
+                with rift.runtime_transaction() as state:
+                    state.setdefault("open", {})[f"rift-{workspace_id}"] = {
+                        "workspace_id": workspace_id,
+                        "workspace_name": str(workspace_id),
+                    }
+                    time.sleep(0.01)
+            except Exception as error:
+                failures.append(error)
+
+        with patch.object(rift, "hypr_json", return_value=[{"id": item} for item in range(1, 9)]):
+            threads = [threading.Thread(target=associate, args=(item,)) for item in range(1, 9)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(failures, [])
+        state = rift.read_json(rift.RUNTIME_FILE, {})
+        self.assertEqual(set(state["open"]), {f"rift-{item}" for item in range(1, 9)})
 
     def test_explicit_empty_selection_saves_no_apps(self):
         apps = [{"id": "editor", "name": "Editor", "selected": True}]
