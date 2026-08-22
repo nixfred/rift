@@ -174,6 +174,31 @@ class RiftHelperTests(unittest.TestCase):
             ["ghostty", "--working-directory=/tmp/nova"],
         )
 
+    def test_desktop_exec_binary_parses_quoted_and_escaped_paths(self):
+        self.assertEqual(
+            rift.desktop_exec_binary('"/opt/My Editor/bin/editor" --open %F'),
+            "/opt/My Editor/bin/editor",
+        )
+        self.assertEqual(
+            rift.desktop_exec_binary(r"/opt/My\ Editor/bin/editor %U"),
+            "/opt/My Editor/bin/editor",
+        )
+
+    def test_desktop_exec_binary_unwraps_environment_command(self):
+        self.assertEqual(
+            rift.desktop_exec_binary("env --ignore-environment THEME=dark /usr/bin/editor %F"),
+            "/usr/bin/editor",
+        )
+        self.assertEqual(
+            rift.desktop_exec_binary("/usr/bin/env --unset DISPLAY -- /usr/bin/editor"),
+            "/usr/bin/editor",
+        )
+
+    def test_desktop_exec_binary_rejects_malformed_or_ambiguous_values(self):
+        self.assertEqual(rift.desktop_exec_binary('"unterminated'), "")
+        self.assertEqual(rift.desktop_exec_binary("env --split-string editor --flag"), "")
+        self.assertEqual(rift.desktop_exec_binary("%F"), "")
+
     def test_unlaunchable_app_does_not_abort_rift(self):
         broken = {"launch": ["missing-app"], "cwd": "", "policy": "launch"}
         working = {"launch": ["working-app"], "cwd": "", "policy": "launch"}
