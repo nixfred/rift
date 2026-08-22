@@ -180,6 +180,8 @@ def process_info(pid: int) -> tuple[str, list[str], str]:
         cwd = str((proc / "cwd").resolve())
     except OSError:
         cwd = ""
+    if cwd.startswith("/proc/") or not cwd.startswith("/"):
+        cwd = ""  # symlink could not be resolved (process mid-exec or gone); unknown, not "/proc/…"
     return executable, argv, cwd
 
 
@@ -226,11 +228,32 @@ GUI_ARGV_APPS = {"code", "code-oss", "codium", "cursor", "zed", "zeditor", "wind
 
 
 def child_pids(pid: int) -> list[int]:
+    # Union the children of EVERY thread: multi-threaded parents (kitten
+    # run-shell, Go/Rust helpers) fork from worker threads, so the main
+    # thread's children file is empty even though `pgrep -P` sees the child.
+    task_dir = Path("/proc") / str(pid) / "task"
     try:
-        text = (Path("/proc") / str(pid) / "task" / str(pid) / "children").read_text()
-        return [int(part) for part in text.split()]
-    except (OSError, ValueError):
-        pass
+        tasks = list(task_dir.iterdir())
+    except OSError:
+        tasks = []
+    if tasks:
+        found: list[int] = []
+        readable = False
+        for task in tasks:
+            try:
+                text = (task / "children").read_text()
+            except (OSError, ValueError):
+                continue
+            readable = True
+            for part in text.split():
+                try:
+                    value = int(part)
+                except ValueError:
+                    continue
+                if value not in found:
+                    found.append(value)
+        if readable:
+            return found
     result = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
@@ -305,14 +328,29 @@ def terminal_session(pid: int) -> dict[str, Any]:
     _exe, _argv, target_cwd = process_info(target)
     session["cwd"] = target_cwd
     ids = proc_ids(target)
-    if not ids:
+    if ids:
+        _ppid, _pgrp, tpgid = ids
+        if tpgid > 0 and tpgid != target:
+            captured = capture_program(tpgid, target_cwd)
+            if captured:
+                session.update(captured)
+                return session
+    if shell_pid:
         return session
-    _ppid, _pgrp, tpgid = ids
-    if tpgid <= 0 or tpgid == target:
-        return session
-    captured = capture_program(tpgid, target_cwd)
-    if captured:
-        session.update(captured)
+    # No shell at all: the terminal runs the program directly — exactly what
+    # Rift's own recipes do (`kitty --hold claude …`). The emulator is a GUI
+    # process with no controlling tty, so tpgid says nothing; take the first
+    # real program among its children instead (depth 2 for helper wrappers).
+    frontier = list(child_pids(pid))
+    for _depth in range(2):
+        next_frontier: list[int] = []
+        for child in frontier:
+            captured = capture_program(child, target_cwd)
+            if captured:
+                session.update(captured)
+                return session
+            next_frontier.extend(child_pids(child))
+        frontier = next_frontier
     return session
 
 
@@ -670,6 +708,44 @@ def normalized_runtime_state(value: Any, signature: str) -> dict[str, Any]:
     return {"signature": signature, "open": valid}
 
 
+def workspace_classes() -> dict[int, set[str]] | None:
+    """Window classes present per workspace, or None when clients can't be read."""
+    try:
+        clients = hypr_json("clients")
+    except Exception:
+        return None
+    result: dict[int, set[str]] = {}
+    usable = False
+    for client in clients if isinstance(clients, list) else []:
+        if not isinstance(client, dict) or not isinstance(client.get("workspace"), dict):
+            continue
+        usable = True
+        workspace_id = numeric_id(client["workspace"].get("id"))
+        for key in ("class", "initialClass"):
+            value = str(client.get(key) or "").strip().casefold()
+            if value:
+                result.setdefault(workspace_id, set()).add(value)
+    return result if usable else None
+
+
+def rift_classes(rift: dict[str, Any] | None) -> set[str]:
+    return {
+        str(app.get("class") or "").strip().casefold()
+        for app in (rift or {}).get("apps", [])
+        if str(app.get("class") or "").strip()
+    }
+
+
+def rift_present_on(rift: dict[str, Any] | None, workspace_id: int, classes: dict[int, set[str]] | None) -> bool:
+    """Is at least one of this Rift's own apps still on that workspace?"""
+    if classes is None:
+        return True  # can't tell; caller falls back to window counts
+    wanted = rift_classes(rift)
+    if not wanted:
+        return True
+    return bool(wanted & classes.get(workspace_id, set()))
+
+
 def runtime_state() -> dict[str, Any]:
     signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
     state = normalized_runtime_state(read_json(RUNTIME_FILE, None), signature)
@@ -684,9 +760,15 @@ def runtime_state() -> dict[str, Any]:
         }
     except Exception:
         return state
+    # Stricter still: a Rift is only "open" while at least one of ITS apps is
+    # on that workspace. Quit the Claude terminal and leave an unrelated
+    # window behind → the Rift is closed, and Open must relaunch, not focus.
+    classes = workspace_classes()
+    rifts_by_slug = {item.get("slug"): item for item in load_rifts()} if classes is not None else {}
     state["open"] = {
         slug: item for slug, item in (state.get("open") or {}).items()
         if int((item or {}).get("workspace_id", 0)) in live_ids
+        and rift_present_on(rifts_by_slug.get(slug), int((item or {}).get("workspace_id", 0)), classes)
     }
     return state
 
@@ -1005,6 +1087,39 @@ def open_rift(slug: str) -> dict[str, Any]:
                 "workspace": association["workspace_id"],
                 "launched": launched,
                 "failed": len(remaining),
+                "results": results,
+            }
+        # Opening an open Rift means "make it whole": anything of its own that
+        # is no longer on that workspace gets relaunched (the Claude terminal
+        # you quit comes back; Brave that is still there is left alone).
+        classes = workspace_classes()
+        present = classes.get(int(association["workspace_id"]), set()) if classes is not None else None
+        missing = []
+        for app in rift.get("apps", []):
+            app_class = str(app.get("class") or "").strip().casefold()
+            if present is None or not app_class:
+                continue
+            if app_class in present:
+                continue
+            if app.get("policy") == "ensure" and app_is_running(app):
+                continue
+            missing.append(app)
+        if missing:
+            wait_for_workspace(int(association["workspace_id"]))
+            results = [launch_app_result(app, rift) for app in missing]
+            failed_now = [result["app"] for result in results if result["status"] == "failed"]
+            launched = sum(result["status"] == "launched" for result in results)
+            if failed_now:
+                with runtime_transaction() as locked:
+                    current = (locked.get("open") or {}).get(rift["slug"])
+                    if current is not None:
+                        current["failed_apps"] = sorted(set(current.get("failed_apps", [])) | set(failed_now))
+            return {
+                "action": "partial" if failed_now else "repaired",
+                "rift": rift["slug"],
+                "workspace": association["workspace_id"],
+                "launched": launched,
+                "failed": len(failed_now),
                 "results": results,
             }
         return {"action": "focused", "rift": rift["slug"], "workspace": association["workspace_id"]}

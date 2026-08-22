@@ -444,11 +444,12 @@ class RiftHelperTests(unittest.TestCase):
         ), patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}, {"id": 10, "windows": 1}]):
             with self.assertRaisesRegex(RuntimeError, "already exists"):
                 rift.save_rift("Nova")
+            # inside the patch: outside it the liveness rule asks the real compositor
+            self.assertEqual(rift.runtime_state()["open"]["nova"]["workspace_id"], 7)
 
         stored = rift.read_json(rift.rift_path("nova"), {})
         self.assertEqual(stored["apps"][0]["id"], "keep")
         self.assertTrue(stored["startup"])
-        self.assertEqual(rift.runtime_state()["open"]["nova"]["workspace_id"], 7)
 
     def test_save_update_of_still_rewrites_the_intended_rift(self):
         with patch.object(rift, "current_workspace", return_value={"id": 7, "name": "7"}), patch.object(
@@ -700,6 +701,67 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(nova["openWorkspace"], 3)
         rift.set_startup("nova", True)
         self.assertNotIn("failedApps", rift.read_json(rift.rift_path("nova"), {}))
+
+    def test_terminal_session_without_shell_finds_direct_program(self):
+        # Rift's own recipe: kitty(100) --hold claude → claude(200); no shell, kitty has no tty.
+        tree = {100: [200]}
+        comm = {200: "claude"}
+        info = {100: ("/usr/bin/kitty", ["kitty"], "/home/pi"), 200: ("/opt/claude", ["claude", "--continue"], "/home/pi/Projects/voice")}
+        with patch.object(rift, "child_pids", side_effect=lambda pid: tree.get(pid, [])), patch.object(
+            rift, "proc_comm", side_effect=lambda pid: comm.get(pid, "")
+        ), patch.object(rift, "process_info", side_effect=lambda pid: info.get(pid, ("", [], ""))), patch.object(
+            rift, "proc_ids", return_value=(1, 100, -1)
+        ):
+            session = rift.terminal_session(100)
+        self.assertEqual(session["program"], "claude")
+        self.assertEqual(session["cwd"], "/home/pi/Projects/voice")
+
+    def _fake_hypr(self, workspaces, clients):
+        def fake(subject):
+            return {"workspaces": workspaces, "clients": clients, "activeworkspace": workspaces[0] if workspaces else {}}[subject]
+        return fake
+
+    def test_association_dies_when_the_rifts_own_apps_are_gone(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.rift_path("voice"), {"schemaVersion": 1, "slug": "voice", "name": "voice",
+                         "apps": [{"id": "t", "class": "kitty", "launch": ["kitty"]}]})
+        rift.atomic_json(rift.RUNTIME_FILE, {"signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+                         "open": {"voice": {"workspace_id": 6, "workspace_name": "6"}}})
+        # workspace 6 still has a window, but it's Brave, not our kitty → closed
+        with patch.object(rift, "hypr_json", side_effect=self._fake_hypr(
+            [{"id": 6, "windows": 1}], [{"workspace": {"id": 6}, "class": "brave-browser"}])):
+            self.assertEqual(rift.runtime_state()["open"], {})
+        # our kitty is there → still open
+        with patch.object(rift, "hypr_json", side_effect=self._fake_hypr(
+            [{"id": 6, "windows": 2}], [{"workspace": {"id": 6}, "class": "kitty"}, {"workspace": {"id": 6}, "class": "brave-browser"}])):
+            self.assertIn("voice", rift.runtime_state()["open"])
+
+    def test_open_repairs_missing_apps_of_an_open_rift(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.rift_path("dev"), {"schemaVersion": 1, "slug": "dev", "name": "Dev", "apps": [
+            {"id": "t", "class": "kitty", "launch": ["kitty", "claude"]},
+            {"id": "b", "class": "brave-browser", "launch": ["gtk-launch", "brave-browser"]}]})
+        rift.atomic_json(rift.RUNTIME_FILE, {"signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+                         "open": {"dev": {"workspace_id": 4, "workspace_name": "4"}}})
+        fake = self._fake_hypr([{"id": 4, "windows": 1}], [{"workspace": {"id": 4}, "class": "brave-browser"}])
+        launched = []
+        with patch.object(rift, "hypr_json", side_effect=fake), patch.object(rift, "hypr_dispatch"), patch.object(
+            rift, "wait_for_workspace", return_value={"id": 4}
+        ), patch.object(rift, "launch_app_result", side_effect=lambda app, r: (launched.append(app["id"]) or {"app": app["id"], "status": "launched"})):
+            result = rift.open_rift("dev")
+        self.assertEqual(result["action"], "repaired")
+        self.assertEqual(launched, ["t"])
+        self.assertEqual(result["launched"], 1)
+
+    def test_process_info_never_returns_a_proc_path_as_cwd(self):
+        class FakePath:
+            def __init__(self, parts): self.parts = parts
+            def __truediv__(self, other): return FakePath(self.parts + [other])
+            def resolve(self): return "/proc/123/cwd" if self.parts[-1] == "cwd" else "/usr/bin/x"
+            def read_bytes(self): return b"x\0"
+        with patch.object(rift, "Path", lambda *a: FakePath(list(a))):
+            _exe, _argv, cwd = rift.process_info(123)
+        self.assertEqual(cwd, "")
 
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(

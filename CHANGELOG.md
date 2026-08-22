@@ -2,6 +2,18 @@
 
 All notable changes to Rift. The version shown in the panel header (`RIFTS vX.Y.Z`) and bar tooltip is the one in `manifest.json`; tests keep them in lockstep.
 
+## v0.3.6 — 2026-08-21 · Capture through multi-threaded wrappers
+
+- `child_pids` unions the `children` of every thread: `kitten run-shell` (and other Go/Rust wrappers) fork from worker threads, so Rift-launched terminals (`kitty --hold claude …`) previously looked empty and an Update degraded them to a bare terminal. Verified live: `kitty → kitten run-shell → btop` now captures `btop`
+
+## v0.3.5 — 2026-08-21 · Open means whole (CORE)
+
+Fred quit the `voice` Rift's terminal, opened the Rift from elsewhere, and got a focus instead of Claude. Three fixes:
+
+- **Open repairs**: opening an open Rift focuses it *and relaunches every app of its own that's missing* (`repaired` result); apps still there are left alone
+- **Liveness is about the Rift's apps**: an association survives only while at least one of the Rift's own app classes is on that workspace — a leftover unrelated window no longer keeps a closed Rift "open"
+- **Capture without a shell**: terminals Rift launched itself (`kitty --hold claude …`) have no shell under them and no tty on the emulator; the foreground program is now found among the terminal's direct children, so updating such a Rift keeps `claude`/`codex` instead of degrading to a bare terminal
+
 ## v0.3.4 — 2026-08-21 · Rename in the entry (#16)
 
 - **Rename** button / `E` in a Rift's entry: inline field, Enter saves, Esc cancels; slug, file and workspace association follow (helper `rename`)
