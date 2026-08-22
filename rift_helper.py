@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any
 
@@ -64,9 +65,19 @@ def ensure_dirs() -> None:
 
 def atomic_json(path: Path, value: Any) -> None:
     ensure_dirs()
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-    temp.replace(path)
+    descriptor, temp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", text=True
+    )
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            json.dump(value, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def read_json(path: Path, fallback: Any) -> Any:
@@ -279,7 +290,7 @@ def runtime_state() -> dict[str, Any]:
     try:
         live_ids = {int(item.get("id", 0)) for item in hypr_json("workspaces")}
     except Exception:
-        live_ids = set()
+        return state
     state["open"] = {
         slug: item for slug, item in (state.get("open") or {}).items()
         if int((item or {}).get("workspace_id", 0)) in live_ids
@@ -332,9 +343,15 @@ def save_rift(name: str, include_ids: list[str] | None = None) -> dict[str, Any]
     }
     atomic_json(rift_path(slug), value)
     workspace = current_workspace()
+    workspace_id = int(workspace.get("id", 0))
     runtime = runtime_state()
+    runtime["open"] = {
+        open_slug: association
+        for open_slug, association in runtime.get("open", {}).items()
+        if open_slug == slug or int(association.get("workspace_id", 0)) != workspace_id
+    }
     runtime.setdefault("open", {})[slug] = {
-        "workspace_id": int(workspace.get("id", 0)),
+        "workspace_id": workspace_id,
         "workspace_name": str(workspace.get("name", "")),
     }
     save_runtime(runtime)
@@ -427,22 +444,22 @@ def delete_rift(slug: str) -> None:
 
 def startup_open() -> dict[str, Any]:
     ensure_dirs()
-    lock = STARTUP_LOCK.open("w")
-    try:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return {"action": "already-running"}
-    signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
-    marker = STATE_ROOT / f"startup-{re.sub(r'[^a-zA-Z0-9_.-]', '_', signature)}"
-    if marker.exists():
-        return {"action": "already-opened"}
-    marker.touch()
-    opened = []
-    for rift in load_rifts():
-        if rift.get("startup"):
-            opened.append(open_rift(rift["slug"]))
-            time.sleep(0.25)
-    return {"action": "startup", "opened": opened}
+    with STARTUP_LOCK.open("w") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"action": "already-running"}
+        signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+        marker = STATE_ROOT / f"startup-{re.sub(r'[^a-zA-Z0-9_.-]', '_', signature)}"
+        if marker.exists():
+            return {"action": "already-opened"}
+        opened = []
+        for rift in load_rifts():
+            if rift.get("startup"):
+                opened.append(open_rift(rift["slug"]))
+                time.sleep(0.25)
+        marker.touch()
+        return {"action": "startup", "opened": opened}
 
 
 def emit(value: Any) -> None:
