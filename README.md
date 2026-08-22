@@ -50,8 +50,8 @@ Honesty section — this is the whole product, so here's exactly what is and isn
 | | Captured | How it comes back |
 |---|---|---|
 | **Terminal** (Ghostty, Kitty, Alacritty, Foot, WezTerm) | the **shell's real working directory** (not the terminal's), and the **program in the foreground** | terminal relaunched in that directory, `--hold` so it stays open |
-| **Claude Code** running in a terminal | its full argv (your wrapper flags survive) | `claude … --continue` — resumes the most recent conversation in that directory. **Yes, your Claude session comes back.** |
-| **Codex** in a terminal | that it was Codex | `codex resume --last` |
+| **Claude Code** running in a terminal | argv + `resume: claude-continue` (toggle in the entry) | terminal in that directory; `--continue` only if resume is on. Wrapper flags stay on the stored command. |
+| **Codex** in a terminal | that it was Codex | **not replayed** — `codex resume --last` is the global last session, not this folder. You get the shell in the right directory. |
 | `nvim`, `hx`, `btop`, `lazygit`, `ssh host`, `tmux`, `yazi`… | argv | replayed as-is |
 | any other foreground command | recorded (shown in the entry) but **not replayed** — you get the shell in the right directory | — |
 | **GUI app** with a `.desktop` entry | the entry id | `gtk-launch <id>` (the way Omarchy launches it) |
@@ -69,6 +69,7 @@ A Rift is a **singleton**: opening one that is already open focuses its workspac
 - **Global apps are global.** Spotify, Signal, Discord, Slack, 1Password, Bitwarden are tagged `ensure` — Rift will never launch a second copy if one is already running anywhere. They're also deselected by default at save time so your "Work" Rift doesn't own your music.
 - **Pick exactly what's in the Rift.** The save panel lists every detected app with a toggle. Don't want the browser in there? Untick it.
 - **Knows when you drifted.** If the apps on a Rift's workspace no longer match what was saved, the panel lights up the `󰑐` button — one click (or `U`) re-records it. Every update keeps the previous recipe, so **Revert** is always one click away.
+- **Named workspaces, not recycled ids.** A Rift owns Hyprland workspace `rift-<slug>`. Numeric ids are reused; names are not. That is why an empty workspace 7 can never inherit yesterday's Rift.
 - **Survives compositor restarts correctly.** Runtime workspace associations are keyed to `HYPRLAND_INSTANCE_SIGNATURE` and pruned against live workspaces, so stale "this Rift is on workspace 7" claims die with the session that made them.
 - **Shell noise filtered out.** Omarchy shell, Quickshell, Walker/wofi/rofi/fuzzel never end up inside a Rift.
 - **Launched apps know their Rift.** Every process gets `RIFT_NAME` and `RIFT_SLUG` in its environment — hook your own tooling on it.
@@ -191,9 +192,14 @@ bind = SUPER, R, exec, omarchy-shell nixfred.rift toggle
 
 ## Roadmap
 
-- [x] Delete and rename from the panel
-- [ ] Per-app launch delay & ordering
-- [ ] Optional `exec` override per app in the save panel
+Unfreeze path (see [AGENTS.md](AGENTS.md)):
+
+- [x] Named Hyprland workspaces (`rift-<slug>`) as the identity (#19)
+- [x] Resume is an explicit recipe field, togglable in the entry (#17 start)
+- [ ] Full recipe editor (argv / cwd / ensure)
+- [ ] Selective drift review (#21)
+
+Frozen until that path is boring: launch stages, import/export, templates, project-aware recipes, tmux/SSH persistence.
 
 ## Contributing
 

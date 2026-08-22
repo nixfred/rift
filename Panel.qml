@@ -11,7 +11,7 @@ Panel {
   ipcTarget: "nixfred.rift"
   manageIpc: false
 
-  readonly property string riftVersion: "0.3.4"  // keep in lockstep with manifest.json (tests enforce)
+  readonly property string riftVersion: "0.4.0"  // keep in lockstep with manifest.json (tests enforce)
   property var anchorItem: null
   property var hostWidget: null
   property string helperPath: ""
@@ -233,6 +233,12 @@ Panel {
     runAction("rename", ["rename", detailRift.slug, name])
   }
 
+  function toggleResume(app) {
+    if (!detailRift || !app || actionProcess.running) return
+    var next = app.resume === "claude-continue" ? "off" : "on"
+    runAction("resume", ["set-resume", detailRift.slug, app.id, next])
+  }
+
   function resultIcon(status) {
     if (status === "launched") return "󰄬"
     if (status === "already-running") return "󰑖"
@@ -378,6 +384,9 @@ Panel {
           root.detailSlug = response.data.slug
           root.statusText = "Renamed to " + response.data.name
           keyCatcher.forceActiveFocus()
+          root.refresh()
+        } else if (root.pendingAction === "resume") {
+          root.statusText = "Recipe updated"
           root.refresh()
         } else if (root.pendingAction === "delete") {
           root.mode = "browse"
@@ -792,7 +801,8 @@ Panel {
                   width: parent.width
                   text: root.detailRift
                     ? (root.detailRift.apps.length + " application" + (root.detailRift.apps.length === 1 ? "" : "s")
-                       + (root.detailRift.openWorkspace > 0 ? " · open on workspace " + root.detailRift.openWorkspace : " · not open")
+                       + (root.detailRift.openWorkspaceName ? " · " + root.detailRift.openWorkspaceName
+                          : root.detailRift.openWorkspace > 0 ? " · workspace " + root.detailRift.openWorkspace : " · not open")
                        + (root.detailRift.startup ? " · opens at login" : ""))
                     : ""
                   elide: Text.ElideRight
@@ -820,11 +830,32 @@ Panel {
                   visible: !!(modelData.command && modelData.command.length > 0)
                   width: parent.width
                   text: "      ⟳ " + (modelData.command ? modelData.command.join(" ") : "")
+                    + (modelData.resume === "claude-continue" ? "  + resume" : "")
                   elide: Text.ElideMiddle
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.italic: true
+                }
+                Text {
+                  visible: modelData.program === "codex"
+                  width: parent.width
+                  text: "      recorded · not replayed (codex resume --last is global)"
+                  elide: Text.ElideMiddle
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.italic: true
+                }
+                Button {
+                  visible: modelData.program === "claude"
+                  width: parent.width
+                  text: modelData.resume === "claude-continue" ? "Resume Claude session · on" : "Resume Claude session · off"
+                  leftAlign: true
+                  foreground: root.foreground
+                  focusable: true
+                  enabled: !actionProcess.running
+                  onClicked: root.toggleResume(modelData)
                 }
               }
             }

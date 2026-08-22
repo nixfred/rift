@@ -23,7 +23,12 @@ class RiftHelperTests(unittest.TestCase):
         self.rifts = patch.object(rift, "RIFTS_ROOT", root / "config/rifts")
         self.state = patch.object(rift, "STATE_ROOT", root / "state")
         self.runtime = patch.object(rift, "RUNTIME_FILE", root / "state/runtime.json")
-        for item in (self.config, self.rifts, self.state, self.runtime):
+        self.bind = patch.object(
+            rift,
+            "bind_rift_workspace",
+            side_effect=lambda workspace_id, slug: rift.rift_workspace_name(slug),
+        )
+        for item in (self.config, self.rifts, self.state, self.runtime, self.bind):
             item.start()
 
     def tearDown(self):
@@ -126,7 +131,7 @@ class RiftHelperTests(unittest.TestCase):
         runtime = rift.read_json(rift.RUNTIME_FILE, {})
         self.assertEqual(
             runtime["open"],
-            {"new": {"workspace_id": 2, "workspace_name": "2"}},
+            {"new": {"workspace_id": 2, "workspace_name": "rift-new"}},
         )
 
     def test_open_existing_rift_focuses_without_relaunching(self):
@@ -436,11 +441,11 @@ class RiftHelperTests(unittest.TestCase):
         ), patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}, {"id": 10, "windows": 1}]):
             with self.assertRaisesRegex(RuntimeError, "already exists"):
                 rift.save_rift("Nova")
+            self.assertEqual(rift.runtime_state()["open"]["nova"]["workspace_id"], 7)
 
         stored = rift.read_json(rift.rift_path("nova"), {})
         self.assertEqual(stored["apps"][0]["id"], "keep")
         self.assertTrue(stored["startup"])
-        self.assertEqual(rift.runtime_state()["open"]["nova"]["workspace_id"], 7)
 
     def test_save_update_of_still_rewrites_the_intended_rift(self):
         with patch.object(rift, "current_workspace", return_value={"id": 7, "name": "7"}), patch.object(
@@ -530,6 +535,60 @@ class RiftHelperTests(unittest.TestCase):
         self.assertTrue(rift.rift_path("old").exists())
         self.assertTrue(rift.rift_path("shiny-new").exists())
 
+    def test_rift_workspace_name_is_stable_and_prefixed(self):
+        self.assertEqual(rift.rift_workspace_name("Nova"), "rift-nova")
+        self.assertEqual(rift.rift_workspace_name("shiny-new"), "rift-shiny-new")
+
+    def test_find_workspace_named_matches_on_name_not_id(self):
+        workspaces = [
+            {"id": 7, "name": "7", "windows": 2},
+            {"id": 12, "name": "rift-nova", "windows": 3},
+        ]
+        with patch.object(rift, "hypr_json", return_value=workspaces):
+            found = rift.find_workspace_named("rift-nova")
+        self.assertEqual(found["id"], 12)
+
+    def test_open_rift_focuses_named_workspace_even_if_numeric_id_changed(self):
+        saved = {"slug": "nova", "name": "Nova", "apps": [{"id": "editor", "launch": ["editor"]}]}
+        runtime = {"signature": "", "open": {"nova": {"workspace_id": 7, "workspace_name": "rift-nova"}}}
+        named = {"id": 22, "name": "rift-nova", "windows": 2}
+        with patch.object(rift, "load_rift", return_value=saved), patch.object(
+            rift, "runtime_state", return_value=runtime
+        ), patch.object(rift, "find_workspace_named", return_value=named), patch.object(
+            rift, "hypr_dispatch"
+        ) as dispatch, patch.object(rift, "launch_app_result") as launch:
+            result = rift.open_rift("nova")
+        self.assertEqual(result["action"], "focused")
+        self.assertEqual(result["workspace"], 22)
+        dispatch.assert_called_once_with("workspace", "22")
+        launch.assert_not_called()
+
+    def test_set_app_resume_toggles_claude_continue_in_launch(self):
+        rift.ensure_dirs()
+        rift.atomic_json(
+            rift.rift_path("nova"),
+            {
+                "schemaVersion": 1,
+                "slug": "nova",
+                "name": "Nova",
+                "apps": [{
+                    "id": "terminal:kitty:/tmp:claude",
+                    "kind": "terminal",
+                    "program": "claude",
+                    "cwd": "/tmp",
+                    "command": ["claude", "--dangerously-skip-permissions"],
+                    "resume": "claude-continue",
+                    "launch": ["kitty", "--directory", "/tmp", "--hold", "claude", "--dangerously-skip-permissions", "--continue"],
+                }],
+            },
+        )
+        off = rift.set_app_resume("nova", "terminal:kitty:/tmp:claude", False)
+        self.assertEqual(off["apps"][0]["resume"], "")
+        self.assertNotIn("--continue", off["apps"][0]["launch"])
+        on = rift.set_app_resume("nova", "terminal:kitty:/tmp:claude", True)
+        self.assertEqual(on["apps"][0]["resume"], "claude-continue")
+        self.assertEqual(on["apps"][0]["launch"][-1], "--continue")
+
     def test_delete_removes_runtime_association_before_file(self):
         rift.ensure_dirs()
         rift.atomic_json(rift.rift_path("nova"), {"schemaVersion": 1, "slug": "nova", "name": "Nova", "apps": []})
@@ -615,7 +674,8 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(session["cwd"], "/proj")
 
     def test_resume_command_policy(self):
-        self.assertEqual(rift.resume_command({"command": ["codex", "--yolo"], "program": "codex"}), ["codex", "resume", "--last"])
+        self.assertEqual(rift.resume_command({"command": ["codex", "--yolo"], "program": "codex"}), [])
+        self.assertEqual(rift.recipe_from_session({"command": ["codex", "--yolo"], "program": "codex"}), ([], ""))
         self.assertEqual(rift.resume_command({"command": ["nvim", "a.py"], "program": "nvim"}), ["nvim", "a.py"])
         self.assertEqual(rift.resume_command({"command": ["python3", "-m", "http.server"], "program": "python3"}), [])
         self.assertEqual(rift.resume_command({"command": [], "program": ""}), [])
@@ -634,6 +694,13 @@ class RiftHelperTests(unittest.TestCase):
                 "program": "claude",
             }),
             ["claude", "--append-system-prompt-file", "/x/LARRY.md", "--dangerously-skip-permissions", "--continue"],
+        )
+        self.assertEqual(
+            rift.recipe_from_session({
+                "command": ["claude", "--dangerously-skip-permissions"],
+                "program": "claude",
+            }),
+            (["claude", "--dangerously-skip-permissions"], "claude-continue"),
         )
 
     def test_terminal_recipe_runs_command_per_terminal(self):
@@ -681,10 +748,14 @@ class RiftHelperTests(unittest.TestCase):
         rift.atomic_json(
             rift.RUNTIME_FILE,
             {"signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
-             "open": {"nova": {"workspace_id": 3, "workspace_name": "3", "failed_apps": ["a"]}}},
+             "open": {"nova": {"workspace_id": 3, "workspace_name": "rift-nova", "failed_apps": ["a"]}}},
         )
         def fake_hypr(subject):
-            return {"workspaces": [{"id": 3, "windows": 1}], "activeworkspace": {"id": 3, "name": "3"}, "clients": []}[subject]
+            return {
+                "workspaces": [{"id": 3, "name": "rift-nova", "windows": 1}],
+                "activeworkspace": {"id": 3, "name": "rift-nova"},
+                "clients": [],
+            }[subject]
         with patch.object(rift, "hypr_json", side_effect=fake_hypr), patch.object(rift, "desktop_entries", return_value=[]):
             state = rift.state_payload()
         nova = next(r for r in state["rifts"] if r["slug"] == "nova")

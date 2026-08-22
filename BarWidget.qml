@@ -10,7 +10,12 @@ BarWidget {
 
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
   readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
-  readonly property string helperPath: Qt.resolvedUrl("rift_helper.py").toString().replace(/^file:\/\//, "")
+  readonly property string helperPath: {
+    var raw = Qt.resolvedUrl("rift_helper.py").toString()
+    if (raw.indexOf("file://") === 0)
+      return decodeURIComponent(raw.replace(/^file:\/\/(localhost)?/, ""))
+    return raw
+  }
 
   function injectPanel() {
     var target = panelLoader.item

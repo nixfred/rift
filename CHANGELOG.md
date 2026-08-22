@@ -2,6 +2,16 @@
 
 All notable changes to Rift. The version shown in the panel header (`RIFTS vX.Y.Z`) and bar tooltip is the one in `manifest.json`; tests keep them in lockstep.
 
+## v0.4.0 — 2026-08-22 · Named workspaces and honest recipes (Grok)
+
+- **Identity is `rift-<slug>`**, a Hyprland workspace name, not a recycled numeric id. Open/focus/update look up that name. Saving a Rift renames the workspace. Numeric ids remain a cache only (#19).
+- **Resume is a stored field**, not a silent argv rewrite. Claude sessions default to `resume: claude-continue` (toggle in the entry). `claude mcp` / `-p` still never resume.
+- **Codex is recorded, not replayed.** `codex resume --last` is global last-session, not "this directory". The entry says so.
+- Capture remains a save-time suggestion (`/proc` + tpgid). The JSON is the contract; the entry shows cwd, command, and the resume toggle (#17 start).
+- Startup lock is released before `open_rift` (inflight marker instead of holding flock across Popen).
+- Helper path uses `decodeURIComponent` instead of a naive `file://` strip.
+- Feature freeze for #18/#22–24/#34 is in `AGENTS.md`.
+
 ## v0.3.4 — 2026-08-21 · Rename in the entry (#16)
 
 - **Rename** button / `E` in a Rift's entry: inline field, Enter saves, Esc cancels; slug, file and workspace association follow (helper `rename`)

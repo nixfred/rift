@@ -163,6 +163,39 @@ def slugify(name: str) -> str:
     return slug
 
 
+WORKSPACE_PREFIX = "rift-"
+
+
+def rift_workspace_name(slug: str) -> str:
+    """Stable Hyprland workspace name. Numeric ids are recycled; this is not."""
+    return WORKSPACE_PREFIX + slugify(slug)
+
+
+def list_workspaces() -> list[dict[str, Any]]:
+    try:
+        value = hypr_json("workspaces")
+    except Exception:
+        return []
+    return value if isinstance(value, list) else []
+
+
+def find_workspace_named(name: str) -> dict[str, Any] | None:
+    for item in list_workspaces():
+        if isinstance(item, dict) and str(item.get("name") or "") == name:
+            return item
+    return None
+
+
+def bind_rift_workspace(workspace_id: int, slug: str) -> str:
+    name = rift_workspace_name(slug)
+    if workspace_id > 0:
+        try:
+            hypr_dispatch("renameworkspace", f"{int(workspace_id)} {name}")
+        except RuntimeError:
+            pass
+    return name
+
+
 def process_info(pid: int) -> tuple[str, list[str], str]:
     if pid <= 0:
         return "", [], ""
@@ -193,9 +226,8 @@ def process_info(pid: int) -> tuple[str, list[str], str]:
 
 SHELLS = {"bash", "zsh", "fish", "sh", "dash", "nu", "nushell", "elvish", "xonsh", "tcsh", "ksh"}
 TERMINAL_HELPERS = {"kitten", "ghostty", "alacritty", "foot", "wezterm-gui", "wezterm", "kitty"}
-# Programs that know how to pick their own session back up. The recipe we
-# replay is argv with the resume flag appended, so Fred's wrapper flags survive.
-RESUMABLE = {"claude", "codex"}
+# Claude interactive sessions may opt in to --continue via the stored resume field.
+# Codex is record-only: `codex resume --last` is global, not this directory.
 # `claude [options] [command] [prompt]` — these positionals are admin CLIs,
 # not an interactive coding session. Replaying them with --continue is wrong.
 CLAUDE_SUBCOMMANDS = {
@@ -316,34 +348,69 @@ def terminal_session(pid: int) -> dict[str, Any]:
     return session
 
 
-def resume_command(session: dict[str, Any]) -> list[str]:
-    """Turn a captured foreground program into something worth replaying, or []."""
+def claude_session_eligible(argv: list[str]) -> bool:
+    """Interactive Claude Code only — not print mode, not admin subcommands."""
+    if any(token in {"-p", "--print"} for token in argv):
+        return False
+    for token in argv[1:]:
+        if token == "--":
+            break
+        if token.startswith("-"):
+            continue
+        if token in CLAUDE_SUBCOMMANDS:
+            return False
+        break
+    return True
+
+
+def recipe_from_session(session: dict[str, Any]) -> tuple[list[str], str]:
+    """Save-time suggestion: (command to store, resume policy).
+
+    Resume is a field, not a silent argv mutation. Codex is not replayed.
+    """
     argv = list(session.get("command") or [])
     program = str(session.get("program") or "")
     if not argv or not program:
-        return []
-    if program == "claude":
-        # Print/SDK mode and admin subcommands are not sessions to resume.
-        if any(token in {"-p", "--print"} for token in argv):
-            return []
-        for token in argv[1:]:
-            if token == "--":
-                break
-            if token.startswith("-"):
-                continue
-            if token in CLAUDE_SUBCOMMANDS:
-                return []
-            break
-        # --continue picks up the most recent conversation in this directory,
-        # so a Claude Code session really does come back as that session.
-        if not any(flag in argv for flag in ("--continue", "-c", "--resume", "-r")):
-            argv = argv + ["--continue"]
-        return argv
+        return [], ""
+    if program == "claude" and claude_session_eligible(argv):
+        stored = [token for token in argv if token not in ("--continue", "-c")]
+        return stored, "claude-continue"
     if program == "codex":
-        return ["codex", "resume", "--last"]
+        return [], ""
     if program in REPLAYABLE:
-        return argv
-    return []
+        return argv, ""
+    return [], ""
+
+
+def apply_resume(command: list[str] | None, resume: str) -> list[str]:
+    cmd = list(command or [])
+    if resume == "claude-continue" and not any(
+        flag in cmd for flag in ("--continue", "-c", "--resume", "-r")
+    ):
+        cmd = cmd + ["--continue"]
+    return cmd
+
+
+def emulator_of(app: dict[str, Any]) -> str:
+    ident = str(app.get("id") or "")
+    if ident.startswith("terminal:"):
+        parts = ident.split(":")
+        if len(parts) >= 2:
+            return parts[1]
+    return ""
+
+
+def recompute_terminal_launch(app: dict[str, Any]) -> list[str]:
+    emu = emulator_of(app)
+    if not emu:
+        return list(app.get("launch") or [])
+    return terminal_recipe(emu, str(app.get("cwd") or ""), apply_resume(app.get("command"), str(app.get("resume") or "")))
+
+
+def resume_command(session: dict[str, Any]) -> list[str]:
+    """Launch argv inside the terminal — applies resume policy to the stored command."""
+    command, resume = recipe_from_session(session)
+    return apply_resume(command, resume)
 
 
 def desktop_exec_binary(exec_line: str) -> str:
@@ -493,13 +560,14 @@ def app_from_client(client: dict[str, Any], entries: list[dict[str, str]]) -> di
     desktop = find_desktop_entry([app_class, initial_class], executable, entries)
     command: list[str] = []
     program = ""
+    resume = ""
 
     if terminal and shutil.which(terminal):
         session = terminal_session(pid)
         cwd = session.get("cwd") or cwd
         program = str(session.get("program") or "")
-        command = resume_command(session)
-        launch = terminal_recipe(terminal, cwd, command)
+        command, resume = recipe_from_session(session)
+        launch = terminal_recipe(terminal, cwd, apply_resume(command, resume))
         app_id = f"terminal:{terminal}:{cwd or 'home'}" + (f":{program}" if program else "")
         name = terminal.title() + (f" · {program}" if program else "")
         kind = "terminal"
@@ -535,6 +603,7 @@ def app_from_client(client: dict[str, Any], entries: list[dict[str, str]]) -> di
         "selected": not global_app,
         "program": program,
         "command": command,
+        "resume": resume,
         "title": str(client.get("title") or ""),
     }
 
@@ -745,8 +814,13 @@ def rename_rift(slug: str, new_name: str) -> dict[str, Any]:
         with runtime_transaction() as runtime:
             association = runtime.get("open", {}).pop(old_slug, None)
             if association:
+                association = dict(association)
+                association["workspace_name"] = rift_workspace_name(new_slug)
                 runtime["open"][new_slug] = association
         rift_path(old_slug).unlink(missing_ok=True)
+        named = find_workspace_named(rift_workspace_name(old_slug))
+        if named:
+            bind_rift_workspace(numeric_id(named.get("id")), new_slug)
     return rift
 
 
@@ -760,19 +834,28 @@ def state_payload() -> dict[str, Any]:
             current_slug = slug
             break
     rifts = load_rifts()
+    settings = load_settings()
+    # Named workspaces are the identity. Numeric ids in runtime.json are a cache.
+    named = {
+        str(item.get("name") or ""): item
+        for item in list_workspaces()
+        if isinstance(item, dict)
+    }
+    failed_map = {slug: list(item.get("failed_apps") or []) for slug, item in runtime.get("open", {}).items()}
+    ws_name = str(workspace.get("name") or "")
+    if ws_name.startswith(WORKSPACE_PREFIX):
+        current_slug = ws_name[len(WORKSPACE_PREFIX):]
     current_saved = next((item for item in rifts if item.get("slug") == current_slug), None)
     saved_ids = {app.get("id") for app in (current_saved or {}).get("apps", [])}
     current_ids = {app.get("id") for app in apps if app.get("selected", True)}
-    settings = load_settings()
-    # Tell the panel where every open Rift lives so the entry view can say
-    # "on workspace 7" and only offer Update when you are standing there.
-    open_map = {slug: int(item.get("workspace_id", 0)) for slug, item in runtime.get("open", {}).items()}
-    failed_map = {slug: list(item.get("failed_apps") or []) for slug, item in runtime.get("open", {}).items()}
     for rift in rifts:
-        rift["openWorkspace"] = open_map.get(rift.get("slug"), 0)
+        bound = named.get(rift_workspace_name(str(rift.get("slug") or "")))
+        windows = numeric_id(bound.get("windows")) if bound else 0
+        rift["openWorkspace"] = numeric_id(bound.get("id")) if bound and windows > 0 else 0
+        rift["openWorkspaceName"] = str(bound.get("name") or "") if bound and windows > 0 else ""
         rift["failedApps"] = failed_map.get(rift.get("slug"), [])
     return {
-        "workspace": {"id": workspace.get("id", 0), "name": workspace.get("name", "")},
+        "workspace": {"id": workspace.get("id", 0), "name": ws_name},
         "apps": apps,
         "rifts": rifts,
         "currentRift": current_slug,
@@ -856,8 +939,9 @@ def save_rift(
         }
         runtime.setdefault("open", {})[slug] = {
             "workspace_id": workspace_id,
-            "workspace_name": str(workspace.get("name", "")),
+            "workspace_name": rift_workspace_name(slug),
         }
+    bind_rift_workspace(workspace_id, slug)
     return value
 
 
@@ -983,11 +1067,13 @@ def open_rift(slug: str) -> dict[str, Any]:
     rift = load_rift(slug)
     runtime = runtime_state()
     association = (runtime.get("open") or {}).get(rift["slug"])
-    if association:
-        hypr_dispatch("workspace", str(association["workspace_id"]))
-        pending = set(association.get("failed_apps", []))
+    named = find_workspace_named(rift_workspace_name(rift["slug"]))
+    if named and numeric_id(named.get("windows")) > 0:
+        workspace_id = numeric_id(named.get("id"))
+        hypr_dispatch("workspace", str(workspace_id))
+        pending = set((association or {}).get("failed_apps", []))
         if pending:
-            wait_for_workspace(int(association["workspace_id"]))
+            wait_for_workspace(workspace_id)
             retry_apps = [app for app in rift.get("apps", []) if str(app.get("id", "")) in pending]
             results = [launch_app_result(app, rift) for app in retry_apps]
             remaining = [result["app"] for result in results if result["status"] == "failed"]
@@ -1002,15 +1088,51 @@ def open_rift(slug: str) -> dict[str, Any]:
             return {
                 "action": "partial" if remaining else "opened",
                 "rift": rift["slug"],
-                "workspace": association["workspace_id"],
+                "workspace": workspace_id,
                 "launched": launched,
                 "failed": len(remaining),
                 "results": results,
             }
-        return {"action": "focused", "rift": rift["slug"], "workspace": association["workspace_id"]}
+        return {"action": "focused", "rift": rift["slug"], "workspace": workspace_id}
 
-    workspace = focus_empty_workspace()
-    workspace_id = int(workspace.get("id", 0))
+    if named:
+        workspace = named
+        workspace_id = numeric_id(named.get("id"))
+        hypr_dispatch("workspace", str(workspace_id))
+        wait_for_workspace(workspace_id)
+    elif association and numeric_id(association.get("workspace_id")) > 0:
+        # Pre-0.4 runtime: numeric id only. First open after upgrade binds the name.
+        workspace_id = numeric_id(association["workspace_id"])
+        hypr_dispatch("workspace", str(workspace_id))
+        pending = set(association.get("failed_apps", []))
+        if pending:
+            wait_for_workspace(workspace_id)
+            retry_apps = [app for app in rift.get("apps", []) if str(app.get("id", "")) in pending]
+            results = [launch_app_result(app, rift) for app in retry_apps]
+            remaining = [result["app"] for result in results if result["status"] == "failed"]
+            launched = sum(result["status"] == "launched" for result in results)
+            with runtime_transaction() as locked:
+                current = (locked.get("open") or {}).get(rift["slug"])
+                if current is not None:
+                    if remaining:
+                        current["failed_apps"] = remaining
+                    else:
+                        current.pop("failed_apps", None)
+                    current["workspace_name"] = rift_workspace_name(rift["slug"])
+            bind_rift_workspace(workspace_id, rift["slug"])
+            return {
+                "action": "partial" if remaining else "opened",
+                "rift": rift["slug"],
+                "workspace": workspace_id,
+                "launched": launched,
+                "failed": len(remaining),
+                "results": results,
+            }
+        return {"action": "focused", "rift": rift["slug"], "workspace": workspace_id}
+    else:
+        workspace = focus_empty_workspace()
+        workspace_id = int(workspace.get("id", 0))
+        bind_rift_workspace(workspace_id, rift["slug"])
     apps = rift.get("apps", [])
     results = [launch_app_result(app, rift) for app in apps]
     launched = sum(result["status"] == "launched" for result in results)
@@ -1028,7 +1150,7 @@ def open_rift(slug: str) -> dict[str, Any]:
     with runtime_transaction() as locked:
         locked.setdefault("open", {})[rift["slug"]] = {
             "workspace_id": workspace_id,
-            "workspace_name": str(workspace.get("name", "")),
+            "workspace_name": rift_workspace_name(rift["slug"]),
         }
         if failed:
             locked["open"][rift["slug"]]["failed_apps"] = [
@@ -1052,7 +1174,7 @@ def new_workspace() -> dict[str, Any]:
 
 def persist_rift(rift: dict[str, Any]) -> dict[str, Any]:
     """Write a Rift definition, dropping derived fields that must not be stored."""
-    stored = {key: value for key, value in rift.items() if key not in ("validationErrors", "openWorkspace", "failedApps")}
+    stored = {key: value for key, value in rift.items() if key not in ("validationErrors", "openWorkspace", "openWorkspaceName", "failedApps")}
     atomic_json(rift_path(stored["slug"]), stored)
     return rift
 
@@ -1060,6 +1182,24 @@ def persist_rift(rift: dict[str, Any]) -> dict[str, Any]:
 def set_startup(slug: str, enabled: bool) -> dict[str, Any]:
     rift = load_rift(slug)
     rift["startup"] = enabled
+    return persist_rift(rift)
+
+
+def set_app_resume(slug: str, app_id: str, enabled: bool) -> dict[str, Any]:
+    """Turn Claude resume on or off for one saved app. Recomputes the launch argv."""
+    rift = load_rift(slug)
+    found = None
+    for app in rift.get("apps") or []:
+        if str(app.get("id") or "") == app_id:
+            found = app
+            break
+    if found is None:
+        raise ValueError(f"No application {app_id} in {rift.get('name', slug)}")
+    if enabled and str(found.get("program") or "") != "claude":
+        raise ValueError("Resume is only for interactive Claude Code sessions")
+    found["resume"] = "claude-continue" if enabled else ""
+    if found.get("kind") == "terminal":
+        found["launch"] = recompute_terminal_launch(found)
     return persist_rift(rift)
 
 
@@ -1091,15 +1231,23 @@ def delete_rift(slug: str) -> None:
 
 def startup_open() -> dict[str, Any]:
     ensure_dirs()
+    signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    safe = re.sub(r"[^a-zA-Z0-9_.-]", "_", signature)
+    marker = STATE_ROOT / f"startup-{safe}"
+    inflight = STATE_ROOT / f"startup-{safe}.inflight"
     with startup_lock() as lock:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return {"action": "already-running"}
-        signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
-        marker = STATE_ROOT / f"startup-{re.sub(r'[^a-zA-Z0-9_.-]', '_', signature)}"
         if marker.exists():
             return {"action": "already-opened"}
+        if inflight.exists():
+            return {"action": "already-running"}
+        inflight.touch()
+    # Lock released: open_rift talks to Hyprland and Popen. Do not hold flock
+    # across that. inflight is the in-progress mutex; marker is completion.
+    try:
         opened = []
         needs_retry = []
         for rift in load_rifts():
@@ -1110,11 +1258,11 @@ def startup_open() -> dict[str, Any]:
                     needs_retry.append(rift["slug"])
                 time.sleep(0.25)
         if needs_retry:
-            # Leave the marker unset so the next startup-open retries the stragglers,
-            # but every other startup Rift has already been given its chance.
             raise RuntimeError("Startup Rift needs retry: " + ", ".join(needs_retry))
         marker.touch()
         return {"action": "startup", "opened": opened}
+    finally:
+        inflight.unlink(missing_ok=True)
 
 
 def emit(value: Any) -> None:
@@ -1144,6 +1292,10 @@ def parser() -> argparse.ArgumentParser:
     rename.add_argument("name")
     help_command = sub.add_parser("help")
     help_command.add_argument("enabled", choices=["on", "off"])
+    resume = sub.add_parser("set-resume")
+    resume.add_argument("slug")
+    resume.add_argument("app_id")
+    resume.add_argument("enabled", choices=["on", "off"])
     sub.add_parser("new-workspace")
     sub.add_parser("startup-open")
     return result
@@ -1167,6 +1319,8 @@ def main() -> int:
             emit(rename_rift(args.slug, args.name))
         elif args.command == "help":
             emit(set_help(args.enabled == "on"))
+        elif args.command == "set-resume":
+            emit(set_app_resume(args.slug, args.app_id, args.enabled == "on"))
         elif args.command == "delete":
             delete_rift(args.slug)
             emit({"deleted": args.slug})
