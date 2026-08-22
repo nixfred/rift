@@ -1,5 +1,6 @@
 import importlib.util
 import tempfile
+import threading
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -40,6 +41,28 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in saved["apps"]], ["editor"])
         runtime = rift.read_json(rift.RUNTIME_FILE, {})
         self.assertEqual(runtime["open"]["project-nova"]["workspace_id"], 4)
+
+    def test_atomic_json_supports_concurrent_writers(self):
+        destination = rift.STATE_ROOT / "concurrent.json"
+        barrier = threading.Barrier(12)
+        failures = []
+
+        def write(writer):
+            try:
+                barrier.wait()
+                rift.atomic_json(destination, {"writer": writer, "payload": "x" * 10_000})
+            except Exception as error:
+                failures.append(error)
+
+        threads = [threading.Thread(target=write, args=(writer,)) for writer in range(12)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(failures, [])
+        self.assertIn(rift.read_json(destination, {})["writer"], range(12))
+        self.assertEqual(list(destination.parent.glob("*.tmp")), [])
 
     def test_explicit_empty_selection_saves_no_apps(self):
         apps = [{"id": "editor", "name": "Editor", "selected": True}]

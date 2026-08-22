@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any
 
@@ -64,9 +65,19 @@ def ensure_dirs() -> None:
 
 def atomic_json(path: Path, value: Any) -> None:
     ensure_dirs()
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-    temp.replace(path)
+    descriptor, temp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", text=True
+    )
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            json.dump(value, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def read_json(path: Path, fallback: Any) -> Any:
