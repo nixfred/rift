@@ -333,6 +333,17 @@ class RiftHelperTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Timed out"):
                 rift.wait_for_workspace_change(2, timeout=0)
 
+    def test_wait_for_workspace_change_tolerates_null_workspace_id(self):
+        with patch.object(rift, "current_workspace", return_value={"id": None, "name": "?"}):
+            with self.assertRaisesRegex(RuntimeError, "Timed out"):
+                rift.wait_for_workspace_change(2, timeout=0)
+
+    def test_numeric_id_coerces_null_and_garbage(self):
+        self.assertEqual(rift.numeric_id(None), 0)
+        self.assertEqual(rift.numeric_id(""), 0)
+        self.assertEqual(rift.numeric_id("7"), 7)
+        self.assertEqual(rift.numeric_id("nope"), 0)
+
     def test_update_keeps_previous_recipe_and_revert_swaps_it_back(self):
         first = [{"id": "editor", "name": "Editor", "selected": True, "launch": ["editor"]}]
         second = [{"id": "browser", "name": "Browser", "selected": True, "launch": ["browser"]}]
