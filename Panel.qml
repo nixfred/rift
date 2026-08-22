@@ -147,6 +147,10 @@ Panel {
       nameField.forceActiveFocus()
       return
     }
+    if (selectedAppIds().length === 0) {
+      errorText = "Open at least one application before saving this Rift"
+      return
+    }
     runAction("save", ["save", name, "--apps", selectedAppIds().join("\x1f"),
                        "--expect-workspace", String(stateData.workspace.id)])
   }

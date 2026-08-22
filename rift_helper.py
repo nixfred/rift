@@ -756,6 +756,8 @@ def save_rift(
     focused = current_workspace()
     if int(focused.get("id", 0)) != workspace_id:
         raise RuntimeError("Workspace changed while saving; try again")
+    if not apps:
+        raise ValueError("Open at least one application before saving this Rift")
     existing = read_json(rift_path(slug), {})
     value = {
         "schemaVersion": 1,

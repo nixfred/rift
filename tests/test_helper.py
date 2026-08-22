@@ -105,14 +105,6 @@ class RiftHelperTests(unittest.TestCase):
         state = rift.read_json(rift.RUNTIME_FILE, {})
         self.assertEqual(set(state["open"]), {f"rift-{item}" for item in range(1, 9)})
 
-    def test_explicit_empty_selection_saves_no_apps(self):
-        apps = [{"id": "editor", "name": "Editor", "selected": True}]
-        with patch.object(rift, "current_apps", return_value=apps), patch.object(
-            rift, "current_workspace", return_value={"id": 2, "name": "2"}
-        ), patch.object(rift, "hypr_json", return_value=[{"id": 2}]):
-            saved = rift.save_rift("Empty", [])
-        self.assertEqual(saved["apps"], [])
-
     def test_save_replaces_existing_rift_association_on_workspace(self):
         rift.ensure_dirs()
         rift.atomic_json(
@@ -122,7 +114,11 @@ class RiftHelperTests(unittest.TestCase):
                 "open": {"old": {"workspace_id": 2, "workspace_name": "2"}},
             },
         )
-        with patch.object(rift, "current_apps", return_value=[]), patch.object(
+        with patch.object(
+            rift,
+            "current_apps",
+            return_value=[{"id": "editor", "name": "Editor", "selected": True, "launch": ["editor"]}],
+        ), patch.object(
             rift, "current_workspace", return_value={"id": 2, "name": "2"}
         ), patch.object(rift, "hypr_json", return_value=[{"id": 2}]):
             rift.save_rift("New")
@@ -343,6 +339,25 @@ class RiftHelperTests(unittest.TestCase):
             rift.save_rift("Nova")
             updated = rift.save_rift("Nova", update_of="nova")
         self.assertEqual([app["id"] for app in updated["apps"]], ["editor"])
+    def test_save_refuses_an_empty_application_list(self):
+        with patch.object(rift, "current_workspace", return_value={"id": 4, "name": "4"}), patch.object(
+            rift, "current_apps", return_value=[]
+        ), patch.object(rift, "hypr_json", return_value=[{"id": 4, "windows": 1}]):
+            with self.assertRaisesRegex(ValueError, "at least one application"):
+                rift.save_rift("Empty")
+        self.assertFalse(rift.rift_path("empty").exists())
+
+        with patch.object(rift, "current_workspace", return_value={"id": 4, "name": "4"}), patch.object(
+            rift,
+            "current_apps",
+            return_value=[
+                {"id": "editor", "name": "Editor", "selected": True, "launch": ["editor"]},
+                {"id": "music", "name": "Music", "selected": False, "launch": ["music"]},
+            ],
+        ), patch.object(rift, "hypr_json", return_value=[{"id": 4, "windows": 1}]):
+            with self.assertRaisesRegex(ValueError, "at least one application"):
+                rift.save_rift("Empty", include_ids=[])
+        self.assertFalse(rift.rift_path("empty").exists())
 
     def test_empty_workspace_never_keeps_an_association(self):
         rift.atomic_json(
