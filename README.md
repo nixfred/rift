@@ -66,6 +66,7 @@ The panel is fully keyboard-driven, in the same `KeyboardPanel` style as Omarchy
 | `S` | Save the current workspace as a Rift (opens the app picker) |
 | `U` | One-click update the current Rift with what's on the workspace now |
 | `R` | Revert the current Rift to its previous recipe |
+| `D` | Delete the selected Rift after confirmation |
 | `N` | New Rift from this workspace |
 | `Esc` | Close |
 | `Tab` / `Shift+Tab` | Switch to neighbouring bar popouts |
@@ -171,7 +172,7 @@ bind = SUPER, R, exec, omarchy-shell nixfred.rift toggle
 
 ## Roadmap
 
-- [ ] Delete / rename from the panel (CLI `delete` exists today)
+- [ ] Rename / duplicate from the panel
 - [ ] Per-app launch delay & ordering
 - [ ] Optional `exec` override per app in the save panel
 

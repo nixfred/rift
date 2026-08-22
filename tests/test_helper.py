@@ -259,6 +259,24 @@ class RiftHelperTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Nothing to revert"):
             rift.revert_rift("solo")
 
+    def test_delete_removes_definition_and_runtime_association(self):
+        rift.ensure_dirs()
+        path = rift.rift_path("nova")
+        rift.atomic_json(path, {"schemaVersion": 1, "slug": "nova", "name": "Nova", "apps": []})
+        rift.atomic_json(
+            rift.RUNTIME_FILE,
+            {
+                "signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+                "open": {"nova": {"workspace_id": 7, "workspace_name": "7"}},
+            },
+        )
+
+        with patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}]):
+            rift.delete_rift("nova")
+
+        self.assertFalse(path.exists())
+        self.assertEqual(rift.read_json(rift.RUNTIME_FILE, {})["open"], {})
+
     def test_version_is_in_lockstep_between_manifest_and_panel(self):
         import json, re
         root = Path(__file__).parents[1]

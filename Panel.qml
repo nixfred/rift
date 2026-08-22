@@ -25,6 +25,8 @@ Panel {
   property string stateOutput: ""
   property string actionOutput: ""
   property bool refreshPending: false
+  property string pendingDeleteSlug: ""
+  property string pendingDeleteName: ""
   // The panel's model is only trustworthy when it describes the workspace that
   // is focused RIGHT NOW. Anything that writes (save/update/revert) is disabled
   // while stale, and the helper double-checks with --expect-workspace anyway.
@@ -157,6 +159,25 @@ Panel {
     runAction("startup", ["startup", rift.slug, rift.startup ? "off" : "on"])
   }
 
+  function requestDelete(rift) {
+    pendingDeleteSlug = rift.slug
+    pendingDeleteName = rift.name
+    statusText = ""
+    errorText = ""
+    mode = "confirm-delete"
+  }
+
+  function cancelDelete() {
+    pendingDeleteSlug = ""
+    pendingDeleteName = ""
+    mode = "browse"
+    keyCatcher.forceActiveFocus()
+  }
+
+  function confirmDelete() {
+    if (pendingDeleteSlug !== "") runAction("delete", ["delete", pendingDeleteSlug])
+  }
+
   // One-click: re-record whatever is on this workspace under the current Rift's name.
   function updateCurrent() {
     if (!currentRift || !canWrite) return
@@ -238,6 +259,14 @@ Panel {
           root.statusText = "Saved " + response.data.name
           root.notify("Rift saved", response.data.apps.length + " application" + (response.data.apps.length === 1 ? "" : "s"))
           root.refresh()
+        } else if (root.pendingAction === "delete") {
+          var deletedName = root.pendingDeleteName
+          root.mode = "browse"
+          root.pendingDeleteSlug = ""
+          root.pendingDeleteName = ""
+          root.statusText = "Deleted " + deletedName
+          root.notify("Rift deleted", deletedName + " was removed. Its applications were left open.")
+          root.refresh()
         } else {
           root.refresh()
         }
@@ -264,8 +293,14 @@ Panel {
       anchors.fill: parent
       blocked: root.mode === "save"
       onMoveRequested: function(dx, dy) { if (dy !== 0) root.moveSelection(dy) }
-      onActivateRequested: root.activateSelection()
-      onCloseRequested: root.close()
+      onActivateRequested: {
+        if (root.mode === "confirm-delete") root.confirmDelete()
+        else root.activateSelection()
+      }
+      onCloseRequested: {
+        if (root.mode === "confirm-delete") root.cancelDelete()
+        else root.close()
+      }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(text) {
         if (!root.canWrite) return
@@ -273,6 +308,7 @@ Panel {
         else if (text === "s" || text === "S") root.beginSave(root.currentRift ? root.currentRift.name : "")
         else if ((text === "u" || text === "U") && root.currentRift) root.updateCurrent()
         else if ((text === "r" || text === "R") && root.currentRift && root.currentRift.previous) root.revertCurrent()
+        else if ((text === "d" || text === "D") && root.mode === "browse" && root.rifts.length > 0) root.requestDelete(root.rifts[root.selectedIndex])
       }
 
       Flickable {
@@ -450,7 +486,7 @@ Panel {
 
                   Column {
                     anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width - parent.children[0].width - startupButton.width - parent.spacing * 2
+                    width: parent.width - parent.children[0].width - startupButton.width - deleteButton.width - parent.spacing * 3
                     spacing: Style.space(2)
 
                     Text {
@@ -482,6 +518,16 @@ Panel {
                     foreground: root.foreground
                     hoverColor: root.foreground
                     onClicked: root.toggleStartup(modelData)
+                  }
+
+                  PanelActionButton {
+                    id: deleteButton
+                    anchors.verticalCenter: parent.verticalCenter
+                    iconText: "󰆴"
+                    tooltipText: "Delete Rift · D"
+                    foreground: root.urgent
+                    hoverColor: root.urgent
+                    onClicked: root.requestDelete(modelData)
                   }
                 }
 
@@ -565,6 +611,54 @@ Panel {
                 enabled: root.canWrite && root.apps.length > 0
                 focusable: true
                 onClicked: root.saveCurrent()
+              }
+            }
+          }
+
+          Column {
+            visible: root.mode === "confirm-delete"
+            width: parent.width
+            spacing: Style.space(12)
+
+            Text {
+              text: "DELETE RIFT?"
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              font.letterSpacing: 1.1
+            }
+
+            Text {
+              width: parent.width
+              text: "Delete “" + root.pendingDeleteName + "”? The saved definition and workspace association will be removed. Its open applications will not be closed."
+              wrapMode: Text.WordWrap
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Button {
+                text: "Cancel"
+                foreground: root.foreground
+                focusable: true
+                onClicked: root.cancelDelete()
+              }
+
+              Item { width: Math.max(0, parent.width - parent.children[0].width - parent.children[2].width - parent.spacing * 2); height: 1 }
+
+              Button {
+                text: actionProcess.running ? "Deleting…" : "Delete Rift"
+                iconText: "󰆴"
+                foreground: root.urgent
+                active: true
+                enabled: !actionProcess.running
+                focusable: true
+                onClicked: root.confirmDelete()
               }
             }
           }
