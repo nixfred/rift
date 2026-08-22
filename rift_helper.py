@@ -961,6 +961,50 @@ def app_is_running(app: dict[str, Any]) -> bool:
     return app_running_state(app) == "present"
 
 
+CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+
+
+def codex_session_for(cwd: str) -> str:
+    """Newest Codex session id whose recorded cwd is exactly this directory, or ''.
+
+    `codex resume --last` is the GLOBAL last session — wrong Rift, wrong project.
+    Codex writes session_meta (cwd, session_id) as the first line of each
+    rollout JSONL, so we can pick the right one at launch time.
+    """
+    sessions = CODEX_HOME / "sessions"
+    if not cwd or not sessions.is_dir():
+        return ""
+    best: tuple[str, str] = ("", "")
+    for path in sessions.rglob("rollout-*.jsonl"):
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as stream:
+                first = stream.readline()
+            meta = json.loads(first)
+            payload = meta.get("payload") or {}
+            if meta.get("type") != "session_meta" or str(payload.get("cwd") or "") != cwd:
+                continue
+            stamp = str(payload.get("timestamp") or meta.get("timestamp") or "")
+            session_id = str(payload.get("session_id") or payload.get("id") or "")
+            if session_id and stamp > best[0]:
+                best = (stamp, session_id)
+        except (OSError, ValueError, AttributeError):
+            continue
+    return best[1]
+
+
+def resolve_launch(argv: list[str], cwd: str) -> list[str]:
+    """Late-bind resume recipes to the session that belongs to this directory."""
+    argv = list(argv)
+    for index in range(len(argv) - 2):
+        if Path(argv[index]).name == "codex" and argv[index + 1] == "resume" and argv[index + 2] == "--last":
+            session_id = codex_session_for(cwd)
+            # No session for this directory → start Codex fresh here rather than
+            # resuming some unrelated project's last session.
+            replacement = ["codex", "resume", session_id] if session_id else ["codex"]
+            return argv[:index] + replacement + argv[index + 3:]
+    return argv
+
+
 def launch_app_result(app: dict[str, Any], rift: dict[str, Any]) -> dict[str, str]:
     identity = str(app.get("id") or app.get("name") or "unknown")
     if app.get("policy") == "ensure":
@@ -991,6 +1035,7 @@ def launch_app_result(app: dict[str, Any], rift: dict[str, Any]) -> dict[str, st
     env = os.environ.copy()
     env["RIFT_NAME"] = str(rift.get("name", ""))
     env["RIFT_SLUG"] = str(rift.get("slug", ""))
+    argv = resolve_launch(argv, cwd)
     try:
         subprocess.Popen(
             argv,
