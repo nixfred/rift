@@ -240,12 +240,12 @@ class RiftHelperTests(unittest.TestCase):
         first = [{"id": "editor", "name": "Editor", "selected": True, "launch": ["editor"]}]
         second = [{"id": "browser", "name": "Browser", "selected": True, "launch": ["browser"]}]
         with patch.object(rift, "current_workspace", return_value={"id": 3, "name": "3"}), patch.object(
-            rift, "hypr_json", return_value=[{"id": 3}]
+            rift, "hypr_json", return_value=[{"id": 3, "windows": 1}]
         ):
             with patch.object(rift, "current_apps", return_value=first):
                 rift.save_rift("Nova")
             with patch.object(rift, "current_apps", return_value=second):
-                updated = rift.save_rift("Nova")
+                updated = rift.save_rift("Nova", update_of="nova")
 
         self.assertEqual([a["id"] for a in updated["apps"]], ["browser"])
         self.assertEqual([a["id"] for a in updated["previous"]["apps"]], ["editor"])
@@ -302,6 +302,48 @@ class RiftHelperTests(unittest.TestCase):
                 rift.save_rift("Nova", expect_workspace=10, update_of="nova")
         self.assertFalse(rift.rift_path("nova").exists())
 
+    def test_save_refuses_to_overwrite_an_existing_rift_without_update_of(self):
+        rift.ensure_dirs()
+        rift.atomic_json(
+            rift.rift_path("nova"),
+            {
+                "schemaVersion": 1,
+                "slug": "nova",
+                "name": "Nova",
+                "startup": True,
+                "apps": [{"id": "keep", "launch": ["keep"]}],
+            },
+        )
+        rift.atomic_json(
+            rift.RUNTIME_FILE,
+            {
+                "signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+                "open": {"nova": {"workspace_id": 7, "workspace_name": "7"}},
+            },
+        )
+        with patch.object(rift, "current_workspace", return_value={"id": 10, "name": "10"}), patch.object(
+            rift,
+            "current_apps",
+            return_value=[{"id": "editor", "name": "Editor", "selected": True, "launch": ["editor"]}],
+        ), patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}, {"id": 10, "windows": 1}]):
+            with self.assertRaisesRegex(RuntimeError, "already exists"):
+                rift.save_rift("Nova")
+
+        stored = rift.read_json(rift.rift_path("nova"), {})
+        self.assertEqual(stored["apps"][0]["id"], "keep")
+        self.assertTrue(stored["startup"])
+        self.assertEqual(rift.runtime_state()["open"]["nova"]["workspace_id"], 7)
+
+    def test_save_update_of_still_rewrites_the_intended_rift(self):
+        with patch.object(rift, "current_workspace", return_value={"id": 7, "name": "7"}), patch.object(
+            rift,
+            "current_apps",
+            return_value=[{"id": "editor", "name": "Editor", "selected": True, "launch": ["editor"]}],
+        ), patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}]):
+            rift.save_rift("Nova")
+            updated = rift.save_rift("Nova", update_of="nova")
+        self.assertEqual([app["id"] for app in updated["apps"]], ["editor"])
+
     def test_empty_workspace_never_keeps_an_association(self):
         rift.atomic_json(
             rift.RUNTIME_FILE,
@@ -320,7 +362,7 @@ class RiftHelperTests(unittest.TestCase):
         ):
             for name in ("a", "b", "c"):
                 with patch.object(rift, "current_apps", return_value=[{"id": name, "name": name, "selected": True, "launch": [name]}]):
-                    rift.save_rift("Nova")
+                    rift.save_rift("Nova", update_of="nova" if name != "a" else None)
         self.assertEqual([h["apps"][0]["id"] for h in rift.load_rift("nova")["history"]], ["b", "a"])
         self.assertEqual(rift.revert_rift("nova")["apps"][0]["id"], "b")
         self.assertEqual(rift.revert_rift("nova")["apps"][0]["id"], "a")
