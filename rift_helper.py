@@ -279,7 +279,7 @@ def runtime_state() -> dict[str, Any]:
     try:
         live_ids = {int(item.get("id", 0)) for item in hypr_json("workspaces")}
     except Exception:
-        live_ids = set()
+        return state
     state["open"] = {
         slug: item for slug, item in (state.get("open") or {}).items()
         if int((item or {}).get("workspace_id", 0)) in live_ids
