@@ -171,6 +171,25 @@ class RiftHelperTests(unittest.TestCase):
                 with patch.object(rift, "hypr_json", return_value=[]):
                     self.assertEqual(rift.runtime_state(), {"signature": signature, "open": {}})
 
+    def test_runtime_state_preserves_valid_failed_app_ids(self):
+        signature = rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+        rift.atomic_json(
+            rift.RUNTIME_FILE,
+            {
+                "signature": signature,
+                "open": {
+                    "nova": {
+                        "workspace_id": 7,
+                        "workspace_name": "7",
+                        "failed_apps": ["desktop:slack", "", 42],
+                    }
+                },
+            },
+        )
+        with patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}]):
+            state = rift.runtime_state()
+        self.assertEqual(state["open"]["nova"]["failed_apps"], ["desktop:slack"])
+
     def test_load_rifts_skips_invalid_files_and_app_recipes(self):
         rift.ensure_dirs()
         rift.atomic_json(rift.RIFTS_ROOT / "wrong-name.json", {
@@ -606,6 +625,49 @@ class RiftHelperTests(unittest.TestCase):
 
         self.assertEqual(launched, [False, True])
         self.assertEqual(popen.call_count, 2)
+
+    def test_ensure_app_does_not_launch_when_client_state_is_unknown(self):
+        app = {
+            "id": "desktop:slack",
+            "class": "Slack",
+            "policy": "ensure",
+            "launch": ["gtk-launch", "slack"],
+        }
+        with patch.object(rift, "hypr_json", side_effect=RuntimeError("Hyprland busy")), patch.object(
+            rift.subprocess, "Popen"
+        ) as popen:
+            result = rift.launch_app_result(app, {"name": "Work", "slug": "work"})
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["reason"], "state-unknown")
+        popen.assert_not_called()
+
+    def test_ensure_app_launches_only_after_confirmed_absence(self):
+        app = {
+            "id": "desktop:slack",
+            "class": "Slack",
+            "policy": "ensure",
+            "launch": ["gtk-launch", "slack"],
+        }
+        with patch.object(rift, "hypr_json", return_value=[]), patch.object(rift.subprocess, "Popen") as popen:
+            result = rift.launch_app_result(app, {"name": "Work", "slug": "work"})
+        self.assertEqual(result["status"], "launched")
+        popen.assert_called_once()
+
+    def test_ensure_app_reports_existing_client_without_launching(self):
+        app = {
+            "id": "desktop:slack",
+            "class": "Slack",
+            "policy": "ensure",
+            "launch": ["gtk-launch", "slack"],
+        }
+        clients = [{"class": "slack", "initialClass": "Slack"}]
+        with patch.object(rift, "hypr_json", return_value=clients), patch.object(
+            rift.subprocess, "Popen"
+        ) as popen:
+            result = rift.launch_app_result(app, {"name": "Work", "slug": "work"})
+        self.assertEqual(result["status"], "already-running")
+        popen.assert_not_called()
 
     def test_open_rift_keeps_total_failure_retryable(self):
         saved = {"slug": "nova", "name": "Nova", "apps": [{"id": "missing"}]}
