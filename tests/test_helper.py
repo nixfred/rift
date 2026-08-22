@@ -259,6 +259,26 @@ class RiftHelperTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Nothing to revert"):
             rift.revert_rift("solo")
 
+    def test_version_is_in_lockstep_between_manifest_and_panel(self):
+        import json, re
+        root = Path(__file__).parents[1]
+        manifest = json.loads((root / "manifest.json").read_text())["version"]
+        panel = re.search(r'riftVersion:\s*"([^"]+)"', (root / "Panel.qml").read_text()).group(1)
+        self.assertEqual(manifest, panel)
+
+    def test_persist_rift_never_stores_validation_errors(self):
+        rift.ensure_dirs()
+        rift.atomic_json(
+            rift.rift_path("clean"),
+            {"schemaVersion": 1, "slug": "clean", "name": "Clean", "apps": [{"id": "x", "launch": ["x"]}, {"id": "bad"}]},
+        )
+        loaded = rift.load_rift("clean")
+        self.assertTrue(loaded["validationErrors"])
+        rift.set_startup("clean", True)
+        stored = rift.read_json(rift.rift_path("clean"), {})
+        self.assertNotIn("validationErrors", stored)
+        self.assertTrue(stored["startup"])
+
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(
             rift.terminal_recipe("ghostty", "/tmp/nova"),

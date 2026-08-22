@@ -74,7 +74,7 @@ BarWidget {
     fontSize: Style.font.icon
     fixedWidth: root.vertical ? root.barSize : Style.bar.statusSlot
     active: root.opened
-    tooltipText: "Rifts"
+    tooltipText: "Rifts v" + (panelLoader.item && panelLoader.item.riftVersion ? panelLoader.item.riftVersion : "")
     onPressed: function(b) {
       if (b === Qt.LeftButton) root.togglePanel()
     }

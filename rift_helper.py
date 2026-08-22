@@ -643,11 +643,17 @@ def new_workspace() -> dict[str, Any]:
     return {"workspace": {"id": workspace.get("id", 0), "name": workspace.get("name", "")}}
 
 
+def persist_rift(rift: dict[str, Any]) -> dict[str, Any]:
+    """Write a Rift definition, dropping derived fields that must not be stored."""
+    stored = {key: value for key, value in rift.items() if key != "validationErrors"}
+    atomic_json(rift_path(stored["slug"]), stored)
+    return rift
+
+
 def set_startup(slug: str, enabled: bool) -> dict[str, Any]:
     rift = load_rift(slug)
     rift["startup"] = enabled
-    atomic_json(rift_path(slug), rift)
-    return rift
+    return persist_rift(rift)
 
 
 def revert_rift(slug: str) -> dict[str, Any]:
@@ -659,8 +665,7 @@ def revert_rift(slug: str) -> dict[str, Any]:
     rift["previous"] = {"apps": rift.get("apps", []), "savedAt": rift.get("savedAt", 0)}
     rift["apps"] = previous["apps"]
     rift["savedAt"] = int(time.time())
-    atomic_json(rift_path(slug), rift)
-    return rift
+    return persist_rift(rift)
 
 
 def delete_rift(slug: str) -> None:
@@ -684,13 +689,18 @@ def startup_open() -> dict[str, Any]:
         if marker.exists():
             return {"action": "already-opened"}
         opened = []
+        needs_retry = []
         for rift in load_rifts():
             if rift.get("startup"):
                 result = open_rift(rift["slug"])
-                if result.get("action") in {"failed", "partial"}:
-                    raise RuntimeError(f"Startup Rift needs retry: {rift['slug']}")
                 opened.append(result)
+                if result.get("action") in {"failed", "partial"}:
+                    needs_retry.append(rift["slug"])
                 time.sleep(0.25)
+        if needs_retry:
+            # Leave the marker unset so the next startup-open retries the stragglers,
+            # but every other startup Rift has already been given its chance.
+            raise RuntimeError("Startup Rift needs retry: " + ", ".join(needs_retry))
         marker.touch()
         return {"action": "startup", "opened": opened}
 

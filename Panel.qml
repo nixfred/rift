@@ -10,6 +10,7 @@ Panel {
   ipcTarget: "nixfred.rift"
   manageIpc: false
 
+  readonly property string riftVersion: "0.2.0"  // keep in lockstep with manifest.json (tests enforce)
   property var anchorItem: null
   property var hostWidget: null
   property string helperPath: ""
@@ -285,13 +286,23 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(2)
 
-              Text {
-                text: "RIFTS"
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.title
-                font.bold: true
-                font.letterSpacing: 1.2
+              Row {
+                spacing: Style.space(6)
+                Text {
+                  text: "RIFTS"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                  font.bold: true
+                  font.letterSpacing: 1.2
+                }
+                Text {
+                  text: "v" + root.riftVersion
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  anchors.baseline: parent.children[0].baseline
+                }
               }
 
               Text {
