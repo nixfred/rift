@@ -155,7 +155,10 @@ Panel {
                        "--expect-workspace", String(stateData.workspace.id)])
   }
 
-  function openRift(slug) { runAction("open", ["open", slug]) }
+  function openRift(slug) {
+    confirmDelete = false
+    runAction("open", ["open", slug])
+  }
 
   // ＋ always opens the New Rift chooser: save what is here, or start fresh.
   function beginNew() {
@@ -184,6 +187,7 @@ Panel {
   }
 
   function updateRift(rift) {
+    confirmDelete = false
     if (!rift || !canWrite || rift.openWorkspace !== liveWorkspaceId) return
     runAction("update", ["save", rift.name,
                          "--expect-workspace", String(stateData.workspace.id),
@@ -191,6 +195,7 @@ Panel {
   }
 
   function revertRift(rift) {
+    confirmDelete = false
     if (rift && rift.previous && canWrite) runAction("revert", ["revert", rift.slug])
   }
 
@@ -203,6 +208,7 @@ Panel {
   function toggleHelp() { runAction("help", ["help", helpOn ? "off" : "on"]) }
 
   function toggleStartup(rift) {
+    confirmDelete = false
     runAction("startup", ["startup", rift.slug, rift.startup ? "off" : "on"])
   }
 
