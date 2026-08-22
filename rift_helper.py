@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -178,6 +179,42 @@ def process_info(pid: int) -> tuple[str, list[str], str]:
     return executable, argv, cwd
 
 
+def desktop_exec_binary(exec_line: str) -> str:
+    """Return the executable token from a Desktop Entry Exec value."""
+    try:
+        tokens = shlex.split(exec_line, posix=True)
+    except ValueError:
+        return ""
+    if not tokens:
+        return ""
+    index = 0
+    if Path(tokens[0]).name == "env":
+        index = 1
+        while index < len(tokens):
+            token = tokens[index]
+            if token == "--":
+                index += 1
+                break
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", token):
+                index += 1
+                continue
+            if token in {"-u", "--unset"}:
+                index += 2
+                continue
+            if token in {"-i", "--ignore-environment", "-0", "--null", "--debug"}:
+                index += 1
+                continue
+            if token.startswith("--unset=") or token.startswith("--chdir="):
+                index += 1
+                continue
+            if token.startswith("-"):
+                return ""
+            break
+    if index >= len(tokens) or tokens[index].startswith("%"):
+        return ""
+    return tokens[index]
+
+
 def desktop_entries() -> list[dict[str, str]]:
     roots = [Path.home() / ".local/share/applications", Path("/usr/share/applications")]
     entries: list[dict[str, str]] = []
@@ -194,7 +231,7 @@ def desktop_entries() -> list[dict[str, str]]:
             if section.get("Type", "Application") != "Application" or section.getboolean("NoDisplay", fallback=False):
                 continue
             exec_line = section.get("Exec", "").strip()
-            exec_token = exec_line.split()[0] if exec_line else ""
+            exec_token = desktop_exec_binary(exec_line)
             entries.append(
                 {
                     "id": path.name.removesuffix(".desktop"),
