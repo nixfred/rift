@@ -1,4 +1,5 @@
 import importlib.util
+import re
 import tempfile
 import threading
 import time
@@ -29,6 +30,13 @@ class RiftHelperTests(unittest.TestCase):
     def tearDown(self):
         patch.stopall()
         self.temp.cleanup()
+
+    def test_panel_open_and_close_reset_rename_mode(self):
+        panel = (Path(__file__).parents[1] / "Panel.qml").read_text()
+        for function in ("open", "close"):
+            body = re.search(rf"function {function}\(\) \{{(.*?)\n  \}}", panel, re.DOTALL)
+            self.assertIsNotNone(body)
+            self.assertIn("renaming = false", body.group(1))
 
     def test_save_records_selected_apps_and_workspace_association(self):
         apps = [
