@@ -1,6 +1,7 @@
 import importlib.util
 import tempfile
 import threading
+import time
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -63,6 +64,33 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertIn(rift.read_json(destination, {})["writer"], range(12))
         self.assertEqual(list(destination.parent.glob("*.tmp")), [])
+
+    def test_runtime_transaction_preserves_concurrent_mutations(self):
+        barrier = threading.Barrier(8)
+        failures = []
+
+        def associate(workspace_id):
+            try:
+                barrier.wait()
+                with rift.runtime_transaction() as state:
+                    state.setdefault("open", {})[f"rift-{workspace_id}"] = {
+                        "workspace_id": workspace_id,
+                        "workspace_name": str(workspace_id),
+                    }
+                    time.sleep(0.01)
+            except Exception as error:
+                failures.append(error)
+
+        with patch.object(rift, "hypr_json", return_value=[{"id": item} for item in range(1, 9)]):
+            threads = [threading.Thread(target=associate, args=(item,)) for item in range(1, 9)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(failures, [])
+        state = rift.read_json(rift.RUNTIME_FILE, {})
+        self.assertEqual(set(state["open"]), {f"rift-{item}" for item in range(1, 9)})
 
     def test_explicit_empty_selection_saves_no_apps(self):
         apps = [{"id": "editor", "name": "Editor", "selected": True}]
@@ -181,6 +209,31 @@ class RiftHelperTests(unittest.TestCase):
             rift.hypr_dispatch("workspace", "3")
         self.assertEqual(calls, [["hl.dsp.focus({ workspace = 3 })"], ["workspace", "3"]])
 
+    def test_update_keeps_previous_recipe_and_revert_swaps_it_back(self):
+        first = [{"id": "editor", "name": "Editor", "selected": True}]
+        second = [{"id": "browser", "name": "Browser", "selected": True}]
+        with patch.object(rift, "current_workspace", return_value={"id": 3, "name": "3"}), patch.object(
+            rift, "hypr_json", return_value=[{"id": 3}]
+        ):
+            with patch.object(rift, "current_apps", return_value=first):
+                rift.save_rift("Nova")
+            with patch.object(rift, "current_apps", return_value=second):
+                updated = rift.save_rift("Nova")
+
+        self.assertEqual([a["id"] for a in updated["apps"]], ["browser"])
+        self.assertEqual([a["id"] for a in updated["previous"]["apps"]], ["editor"])
+
+        reverted = rift.revert_rift("nova")
+        self.assertEqual([a["id"] for a in reverted["apps"]], ["editor"])
+        self.assertEqual([a["id"] for a in reverted["previous"]["apps"]], ["browser"])
+        self.assertEqual([a["id"] for a in rift.load_rift("nova")["apps"]], ["editor"])
+
+    def test_revert_without_history_is_an_error(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.rift_path("solo"), {"schemaVersion": 1, "slug": "solo", "name": "Solo", "apps": []})
+        with self.assertRaisesRegex(ValueError, "Nothing to revert"):
+            rift.revert_rift("solo")
+
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(
             rift.terminal_recipe("ghostty", "/tmp/nova"),
@@ -219,6 +272,33 @@ class RiftHelperTests(unittest.TestCase):
             result = rift.startup_open()
         self.assertEqual(result["action"], "startup")
         open_rift.assert_called_once_with("nova")
+
+    def test_startup_lock_fallback_stays_in_private_state_directory(self):
+        with patch.dict(rift.os.environ, {}, clear=False):
+            rift.os.environ.pop("XDG_RUNTIME_DIR", None)
+            path = rift.startup_lock_path()
+        self.assertEqual(path, rift.STATE_ROOT / "locks/startup.lock")
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_startup_lock_rejects_symlink_without_touching_target(self):
+        with patch.dict(rift.os.environ, {}, clear=False):
+            rift.os.environ.pop("XDG_RUNTIME_DIR", None)
+            path = rift.startup_lock_path()
+            victim = Path(self.temp.name) / "victim"
+            victim.write_text("keep me")
+            path.symlink_to(victim)
+
+            with self.assertRaises(OSError):
+                rift.startup_open()
+
+        self.assertEqual(victim.read_text(), "keep me")
+
+    def test_startup_lock_contention_reports_already_running(self):
+        with patch.dict(rift.os.environ, {}, clear=False):
+            rift.os.environ.pop("XDG_RUNTIME_DIR", None)
+            with rift.startup_lock() as lock:
+                rift.fcntl.flock(lock.fileno(), rift.fcntl.LOCK_EX | rift.fcntl.LOCK_NB)
+                self.assertEqual(rift.startup_open(), {"action": "already-running"})
 
 
 if __name__ == "__main__":

@@ -9,24 +9,25 @@ from __future__ import annotations
 
 import argparse
 import configparser
+from contextlib import contextmanager
 import fcntl
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import Any, Iterator
 
 
 CONFIG_ROOT = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rift"
 RIFTS_ROOT = CONFIG_ROOT / "rifts"
 STATE_ROOT = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "rift"
 RUNTIME_FILE = STATE_ROOT / "runtime.json"
-STARTUP_LOCK = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / f"rift-startup-{os.getuid()}.lock"
 
 IGNORED_CLASSES = {
     "omarchy-shell",
@@ -63,6 +64,31 @@ def ensure_dirs() -> None:
     STATE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
+def startup_lock_path() -> Path:
+    runtime_root = os.environ.get("XDG_RUNTIME_DIR")
+    directory = Path(runtime_root) / "rift" if runtime_root else STATE_ROOT / "locks"
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    info = directory.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise RuntimeError("Rift lock directory is not private and user-owned")
+    directory.chmod(0o700)
+    return directory / "startup.lock"
+
+
+@contextmanager
+def startup_lock() -> Iterator[Any]:
+    path = startup_lock_path()
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        os.close(descriptor)
+        raise RuntimeError("Rift startup lock is not a user-owned regular file")
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "r+") as lock:
+        yield lock
+
+
 def atomic_json(path: Path, value: Any) -> None:
     ensure_dirs()
     descriptor, temp_name = tempfile.mkstemp(
@@ -76,6 +102,11 @@ def atomic_json(path: Path, value: Any) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         temp.replace(path)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -375,6 +406,17 @@ def save_runtime(state: dict[str, Any]) -> None:
     atomic_json(RUNTIME_FILE, state)
 
 
+@contextmanager
+def runtime_transaction() -> Iterator[dict[str, Any]]:
+    """Serialize a complete runtime-state read, mutation, and replacement."""
+    ensure_dirs()
+    with (STATE_ROOT / "runtime.lock").open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        state = runtime_state()
+        yield state
+        save_runtime(state)
+
+
 def state_payload() -> dict[str, Any]:
     workspace = current_workspace()
     apps = current_apps()
@@ -414,20 +456,24 @@ def save_rift(name: str, include_ids: list[str] | None = None) -> dict[str, Any]
         "apps": apps,
         "savedAt": int(time.time()),
     }
+    # Keep the recipe we are replacing so the panel can offer a one-click revert.
+    if isinstance(existing.get("apps"), list) and existing.get("apps") != apps:
+        value["previous"] = {"apps": existing["apps"], "savedAt": existing.get("savedAt", 0)}
+    elif existing.get("previous"):
+        value["previous"] = existing["previous"]
     atomic_json(rift_path(slug), value)
     workspace = current_workspace()
     workspace_id = int(workspace.get("id", 0))
-    runtime = runtime_state()
-    runtime["open"] = {
-        open_slug: association
-        for open_slug, association in runtime.get("open", {}).items()
-        if open_slug == slug or int(association.get("workspace_id", 0)) != workspace_id
-    }
-    runtime.setdefault("open", {})[slug] = {
-        "workspace_id": workspace_id,
-        "workspace_name": str(workspace.get("name", "")),
-    }
-    save_runtime(runtime)
+    with runtime_transaction() as runtime:
+        runtime["open"] = {
+            open_slug: association
+            for open_slug, association in runtime.get("open", {}).items()
+            if open_slug == slug or int(association.get("workspace_id", 0)) != workspace_id
+        }
+        runtime.setdefault("open", {})[slug] = {
+            "workspace_id": workspace_id,
+            "workspace_name": str(workspace.get("name", "")),
+        }
     return value
 
 
@@ -472,21 +518,20 @@ def launch_app(app: dict[str, Any], rift: dict[str, Any]) -> bool:
 
 def open_rift(slug: str) -> dict[str, Any]:
     rift = load_rift(slug)
-    runtime = runtime_state()
-    association = runtime.get("open", {}).get(rift["slug"])
-    if association:
-        hypr_dispatch("workspace", str(association["workspace_id"]))
-        return {"action": "focused", "rift": rift["slug"], "workspace": association["workspace_id"]}
+    with runtime_transaction() as runtime:
+        association = runtime.get("open", {}).get(rift["slug"])
+        if association:
+            hypr_dispatch("workspace", str(association["workspace_id"]))
+            return {"action": "focused", "rift": rift["slug"], "workspace": association["workspace_id"]}
 
-    hypr_dispatch("workspace", "emptyn")
-    time.sleep(0.12)
-    workspace = current_workspace()
-    workspace_id = int(workspace.get("id", 0))
-    runtime.setdefault("open", {})[rift["slug"]] = {
-        "workspace_id": workspace_id,
-        "workspace_name": str(workspace.get("name", "")),
-    }
-    save_runtime(runtime)
+        hypr_dispatch("workspace", "emptyn")
+        time.sleep(0.12)
+        workspace = current_workspace()
+        workspace_id = int(workspace.get("id", 0))
+        runtime.setdefault("open", {})[rift["slug"]] = {
+            "workspace_id": workspace_id,
+            "workspace_name": str(workspace.get("name", "")),
+        }
     launched = sum(1 for app in rift.get("apps", []) if launch_app(app, rift))
     return {
         "action": "opened",
@@ -511,19 +556,31 @@ def set_startup(slug: str, enabled: bool) -> dict[str, Any]:
     return rift
 
 
+def revert_rift(slug: str) -> dict[str, Any]:
+    """Swap the current recipe with the previous one, so revert is itself revertible."""
+    rift = load_rift(slug)
+    previous = rift.get("previous")
+    if not isinstance(previous, dict) or not isinstance(previous.get("apps"), list):
+        raise ValueError(f"Nothing to revert for {rift.get('name', slug)}")
+    rift["previous"] = {"apps": rift.get("apps", []), "savedAt": rift.get("savedAt", 0)}
+    rift["apps"] = previous["apps"]
+    rift["savedAt"] = int(time.time())
+    atomic_json(rift_path(slug), rift)
+    return rift
+
+
 def delete_rift(slug: str) -> None:
     path = rift_path(slug)
     if not path.exists():
         raise ValueError(f"Rift not found: {slug}")
     path.unlink()
-    runtime = runtime_state()
-    runtime.get("open", {}).pop(slugify(slug), None)
-    save_runtime(runtime)
+    with runtime_transaction() as runtime:
+        runtime.get("open", {}).pop(slugify(slug), None)
 
 
 def startup_open() -> dict[str, Any]:
     ensure_dirs()
-    with STARTUP_LOCK.open("w") as lock:
+    with startup_lock() as lock:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -559,6 +616,8 @@ def parser() -> argparse.ArgumentParser:
     startup.add_argument("enabled", choices=["on", "off"])
     delete = sub.add_parser("delete")
     delete.add_argument("slug")
+    revert = sub.add_parser("revert")
+    revert.add_argument("slug")
     sub.add_parser("new-workspace")
     sub.add_parser("startup-open")
     return result
@@ -576,6 +635,8 @@ def main() -> int:
             emit(open_rift(args.slug))
         elif args.command == "startup":
             emit(set_startup(args.slug, args.enabled == "on"))
+        elif args.command == "revert":
+            emit(revert_rift(args.slug))
         elif args.command == "delete":
             delete_rift(args.slug)
             emit({"deleted": args.slug})
