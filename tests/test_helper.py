@@ -236,12 +236,12 @@ class RiftHelperTests(unittest.TestCase):
         first = [{"id": "editor", "name": "Editor", "selected": True, "launch": ["editor"]}]
         second = [{"id": "browser", "name": "Browser", "selected": True, "launch": ["browser"]}]
         with patch.object(rift, "current_workspace", return_value={"id": 3, "name": "3"}), patch.object(
-            rift, "hypr_json", return_value=[{"id": 3}]
+            rift, "hypr_json", return_value=[{"id": 3, "windows": 1}]
         ):
             with patch.object(rift, "current_apps", return_value=first):
                 rift.save_rift("Nova")
             with patch.object(rift, "current_apps", return_value=second):
-                updated = rift.save_rift("Nova")
+                updated = rift.save_rift("Nova", update_of="nova")
 
         self.assertEqual([a["id"] for a in updated["apps"]], ["browser"])
         self.assertEqual([a["id"] for a in updated["previous"]["apps"]], ["editor"])
@@ -298,6 +298,47 @@ class RiftHelperTests(unittest.TestCase):
                 rift.save_rift("Nova", expect_workspace=10, update_of="nova")
         self.assertFalse(rift.rift_path("nova").exists())
 
+    def test_save_refuses_to_overwrite_an_existing_rift_without_update_of(self):
+        rift.ensure_dirs()
+        rift.atomic_json(
+            rift.rift_path("nova"),
+            {
+                "schemaVersion": 1,
+                "slug": "nova",
+                "name": "Nova",
+                "startup": True,
+                "apps": [{"id": "keep", "launch": ["keep"]}],
+            },
+        )
+        rift.atomic_json(
+            rift.RUNTIME_FILE,
+            {
+                "signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+                "open": {"nova": {"workspace_id": 7, "workspace_name": "7"}},
+            },
+        )
+        with patch.object(rift, "current_workspace", return_value={"id": 10, "name": "10"}), patch.object(
+            rift,
+            "current_apps",
+            return_value=[{"id": "editor", "name": "Editor", "selected": True, "launch": ["editor"]}],
+        ), patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}, {"id": 10, "windows": 1}]):
+            with self.assertRaisesRegex(RuntimeError, "already exists"):
+                rift.save_rift("Nova")
+
+        stored = rift.read_json(rift.rift_path("nova"), {})
+        self.assertEqual(stored["apps"][0]["id"], "keep")
+        self.assertTrue(stored["startup"])
+        self.assertEqual(rift.runtime_state()["open"]["nova"]["workspace_id"], 7)
+
+    def test_save_update_of_still_rewrites_the_intended_rift(self):
+        with patch.object(rift, "current_workspace", return_value={"id": 7, "name": "7"}), patch.object(
+            rift,
+            "current_apps",
+            return_value=[{"id": "editor", "name": "Editor", "selected": True, "launch": ["editor"]}],
+        ), patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}]):
+            rift.save_rift("Nova")
+            updated = rift.save_rift("Nova", update_of="nova")
+        self.assertEqual([app["id"] for app in updated["apps"]], ["editor"])
     def test_save_refuses_an_empty_application_list(self):
         with patch.object(rift, "current_workspace", return_value={"id": 4, "name": "4"}), patch.object(
             rift, "current_apps", return_value=[]
@@ -336,7 +377,7 @@ class RiftHelperTests(unittest.TestCase):
         ):
             for name in ("a", "b", "c"):
                 with patch.object(rift, "current_apps", return_value=[{"id": name, "name": name, "selected": True, "launch": [name]}]):
-                    rift.save_rift("Nova")
+                    rift.save_rift("Nova", update_of="nova" if name != "a" else None)
         self.assertEqual([h["apps"][0]["id"] for h in rift.load_rift("nova")["history"]], ["b", "a"])
         self.assertEqual(rift.revert_rift("nova")["apps"][0]["id"], "b")
         self.assertEqual(rift.revert_rift("nova")["apps"][0]["id"], "a")
@@ -367,6 +408,42 @@ class RiftHelperTests(unittest.TestCase):
             self.assertEqual(renamed["slug"], "shiny-new")
             self.assertFalse(rift.rift_path("old").exists())
             self.assertEqual(rift.runtime_state()["open"]["shiny-new"]["workspace_id"], 4)
+
+    def test_terminal_session_finds_shell_cwd_and_foreground_program(self):
+        # kitty(100) -> kitten(101), bash(102), kitten(103); bash -> claude(200)
+        tree = {100: [101, 102, 103], 102: [200]}
+        comm = {101: "kitten", 102: "bash", 103: "kitten", 200: "claude"}
+        info = {
+            102: ("/usr/bin/bash", ["bash"], "/home/pi/Projects/rift"),
+            200: ("/usr/bin/node", ["claude", "--append-system-prompt-file", "/x/LARRY.md", "--dangerously-skip-permissions"], "/home/pi/Projects/rift"),
+        }
+        with patch.object(rift, "child_pids", side_effect=lambda pid: tree.get(pid, [])), patch.object(
+            rift, "proc_comm", side_effect=lambda pid: comm.get(pid, "")
+        ), patch.object(rift, "process_info", side_effect=lambda pid: info.get(pid, ("", [], ""))):
+            session = rift.terminal_session(100)
+        self.assertEqual(session["cwd"], "/home/pi/Projects/rift")
+        self.assertEqual(session["program"], "claude")
+        resumed = rift.resume_command(session)
+        self.assertEqual(resumed[-1], "--continue")
+        self.assertIn("--dangerously-skip-permissions", resumed)
+        self.assertEqual(
+            rift.terminal_recipe("kitty", "/home/pi/Projects/rift", resumed)[:3],
+            ["kitty", "--directory", "/home/pi/Projects/rift"],
+        )
+
+    def test_resume_command_policy(self):
+        self.assertEqual(rift.resume_command({"command": ["codex", "--yolo"], "program": "codex"}), ["codex", "resume", "--last"])
+        self.assertEqual(rift.resume_command({"command": ["nvim", "a.py"], "program": "nvim"}), ["nvim", "a.py"])
+        self.assertEqual(rift.resume_command({"command": ["python3", "-m", "http.server"], "program": "python3"}), [])
+        self.assertEqual(rift.resume_command({"command": [], "program": ""}), [])
+        self.assertEqual(rift.resume_command({"command": ["claude", "--continue"], "program": "claude"}), ["claude", "--continue"])
+
+    def test_terminal_recipe_runs_command_per_terminal(self):
+        self.assertEqual(rift.terminal_recipe("ghostty", "/p", ["btop"]), ["ghostty", "--working-directory=/p", "--wait-after-command=true", "-e", "btop"])
+        self.assertEqual(rift.terminal_recipe("alacritty", "/p", ["btop"]), ["alacritty", "--working-directory", "/p", "--hold", "-e", "btop"])
+        self.assertEqual(rift.terminal_recipe("kitty", "/p", ["btop"]), ["kitty", "--directory", "/p", "--hold", "btop"])
+        self.assertEqual(rift.terminal_recipe("wezterm", "/p", ["btop"]), ["wezterm", "start", "--cwd", "/p", "--", "btop"])
+        self.assertEqual(rift.terminal_recipe("foot", "", []), ["foot"])
 
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(
@@ -482,6 +559,43 @@ class RiftHelperTests(unittest.TestCase):
         dispatch.assert_called_once_with("workspace", "9")
         launch.assert_called_once_with(saved["apps"][1], saved)
         self.assertNotIn("failed_apps", runtime["open"]["nova"])
+
+    def test_open_rift_does_not_hold_runtime_lock_while_launching(self):
+        rift.ensure_dirs()
+        rift.atomic_json(
+            rift.rift_path("nova"),
+            {
+                "schemaVersion": 1,
+                "slug": "nova",
+                "name": "Nova",
+                "apps": [{"id": "editor", "launch": ["editor"]}],
+            },
+        )
+        entered = threading.Event()
+
+        def launch(_app, _saved):
+            def other():
+                with rift.runtime_transaction() as runtime:
+                    runtime["probe"] = True
+                entered.set()
+
+            worker = threading.Thread(target=other, daemon=True)
+            worker.start()
+            self.assertTrue(entered.wait(1.5), "runtime lock was still held while launching apps")
+            worker.join(timeout=1)
+            return {"app": "editor", "status": "launched"}
+
+        with patch.object(rift, "hypr_dispatch"), patch.object(
+            rift, "current_workspace", return_value={"id": 2, "name": "2"}
+        ), patch.object(
+            rift, "wait_for_workspace_change", return_value={"id": 9, "name": "9"}
+        ), patch.object(
+            rift, "hypr_json", return_value=[{"id": 9, "windows": 1}]
+        ), patch.object(rift, "launch_app_result", side_effect=launch):
+            result = rift.open_rift("nova")
+
+        self.assertEqual(result["action"], "opened")
+        self.assertEqual(rift.runtime_state()["open"]["nova"]["workspace_id"], 9)
 
     def test_partial_startup_does_not_write_completion_marker(self):
         rift.ensure_dirs()

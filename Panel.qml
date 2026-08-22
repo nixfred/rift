@@ -11,7 +11,7 @@ Panel {
   ipcTarget: "nixfred.rift"
   manageIpc: false
 
-  readonly property string riftVersion: "0.3.0"  // keep in lockstep with manifest.json (tests enforce)
+  readonly property string riftVersion: "0.3.1"  // keep in lockstep with manifest.json (tests enforce)
   property var anchorItem: null
   property var hostWidget: null
   property string helperPath: ""
@@ -695,13 +695,27 @@ Panel {
 
             Repeater {
               model: root.detailRift ? root.detailRift.apps : []
-              Text {
+              Column {
                 width: parent.width
-                text: "  " + (modelData.kind === "terminal" ? "󰆍 " : "󰘔 ") + modelData.name + (modelData.cwd ? "  " + modelData.cwd : "")
-                elide: Text.ElideMiddle
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
+                spacing: 0
+                Text {
+                  width: parent.width
+                  text: "  " + (modelData.kind === "terminal" ? "󰆍 " : "󰘔 ") + modelData.name + (modelData.cwd ? "  " + modelData.cwd.replace(/^\/home\/[^\/]+/, "~") : "")
+                  elide: Text.ElideMiddle
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Text {
+                  visible: modelData.command && modelData.command.length > 0
+                  width: parent.width
+                  text: "      ⟳ " + (modelData.command ? modelData.command.join(" ") : "")
+                  elide: Text.ElideMiddle
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.italic: true
+                }
               }
             }
 

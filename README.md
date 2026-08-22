@@ -11,7 +11,7 @@
 [![Omarchy plugin](https://img.shields.io/badge/Omarchy-bar%20plugin-9d7cd8?style=for-the-badge&logo=archlinux&logoColor=white)](https://omarchy.org)
 [![Hyprland](https://img.shields.io/badge/Hyprland-native-58e1ff?style=for-the-badge)](https://hypr.land)
 [![Zero deps](https://img.shields.io/badge/deps-python3%20%2B%20hyprctl-success?style=for-the-badge)](#requirements)
-[![Version](https://img.shields.io/badge/version-0.3.0-8b5cf6?style=for-the-badge)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.1-8b5cf6?style=for-the-badge)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 
 ```bash
@@ -42,6 +42,25 @@ A *Rift* is a named set of applications. Open it and Rift grabs the next empty w
 | Click `＋` (always top-right) | **New Rift** chooser: *save what's on this workspace*, or *start on a fresh, empty workspace* and build it there |
 | Click a Rift | Opens its **entry**: every app it holds, where it's open, and the actions — **Open / Go to workspace**, **Update** (only when you're standing on it), **Revert**, **Open at login**, **Delete** (asks twice) |
 | First run | A short **help** walkthrough sits at the top until you save your first Rift. `󰋖` brings it back any time |
+
+## What a Rift actually saves
+
+Honesty section — this is the whole product, so here's exactly what is and isn't captured.
+
+| | Captured | How it comes back |
+|---|---|---|
+| **Terminal** (Ghostty, Kitty, Alacritty, Foot, WezTerm) | the **shell's real working directory** (not the terminal's), and the **program in the foreground** | terminal relaunched in that directory, `--hold` so it stays open |
+| **Claude Code** running in a terminal | its full argv (your wrapper flags survive) | `claude … --continue` — resumes the most recent conversation in that directory. **Yes, your Claude session comes back.** |
+| **Codex** in a terminal | that it was Codex | `codex resume --last` |
+| `nvim`, `hx`, `btop`, `lazygit`, `ssh host`, `tmux`, `yazi`… | argv | replayed as-is |
+| any other foreground command | recorded (shown in the entry) but **not replayed** — you get the shell in the right directory | — |
+| **GUI app** with a `.desktop` entry | the entry id | `gtk-launch <id>` (the way Omarchy launches it) |
+| **Editors** (VS Code, Cursor, Zed, Windsurf…) | the project folder from argv | `code /that/folder` |
+| **Browser** | the app only — **not the tabs/URLs** (Hyprland exposes titles, never URLs) | opens the browser; use its own "continue where you left off" for tabs |
+| Spotify, Signal, Discord, Slack, 1Password, Bitwarden | tagged `ensure` | never launched twice; deselected by default |
+| Window geometry, monitors, tiling | **nothing, on purpose** | Hyprland tiles |
+
+A Rift is a **singleton**: opening one that is already open focuses its workspace, never launches a second copy.
 
 ## Why it's smarter than "remember my windows"
 
