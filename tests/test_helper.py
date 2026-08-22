@@ -17,6 +17,8 @@ class RiftHelperTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
+        self.settings = patch.object(rift, "SETTINGS_FILE", root / "config/settings.json")
+        self.settings.start()
         self.config = patch.object(rift, "CONFIG_ROOT", root / "config")
         self.rifts = patch.object(rift, "RIFTS_ROOT", root / "config/rifts")
         self.state = patch.object(rift, "STATE_ROOT", root / "state")
@@ -322,6 +324,33 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual([h["apps"][0]["id"] for h in rift.load_rift("nova")["history"]], ["b", "a"])
         self.assertEqual(rift.revert_rift("nova")["apps"][0]["id"], "b")
         self.assertEqual(rift.revert_rift("nova")["apps"][0]["id"], "a")
+
+    def test_help_mode_is_on_for_new_users_until_first_save_and_can_be_reenabled(self):
+        rift.ensure_dirs()
+        self.assertTrue(rift.help_enabled())
+        with patch.object(rift, "current_workspace", return_value={"id": 2, "name": "2"}), patch.object(
+            rift, "current_apps", return_value=[{"id": "a", "name": "A", "selected": True, "launch": ["a"]}]
+        ), patch.object(rift, "hypr_json", return_value=[{"id": 2, "windows": 1}]):
+            rift.save_rift("First")
+        self.assertFalse(rift.help_enabled())
+        rift.set_help(True)
+        self.assertTrue(rift.help_enabled())
+        rift.set_help(False)
+        self.assertFalse(rift.help_enabled())
+
+    def test_rename_moves_file_and_association(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.rift_path("old"), {"schemaVersion": 1, "slug": "old", "name": "Old", "apps": []})
+        rift.atomic_json(
+            rift.RUNTIME_FILE,
+            {"signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+             "open": {"old": {"workspace_id": 4, "workspace_name": "4"}}},
+        )
+        with patch.object(rift, "hypr_json", return_value=[{"id": 4, "windows": 1}]):
+            renamed = rift.rename_rift("old", "Shiny New")
+            self.assertEqual(renamed["slug"], "shiny-new")
+            self.assertFalse(rift.rift_path("old").exists())
+            self.assertEqual(rift.runtime_state()["open"]["shiny-new"]["workspace_id"], 4)
 
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(

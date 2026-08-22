@@ -29,6 +29,7 @@ CONFIG_ROOT = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) /
 RIFTS_ROOT = CONFIG_ROOT / "rifts"
 STATE_ROOT = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "rift"
 RUNTIME_FILE = STATE_ROOT / "runtime.json"
+SETTINGS_FILE = CONFIG_ROOT / "settings.json"
 
 IGNORED_CLASSES = {
     "omarchy-shell",
@@ -461,6 +462,50 @@ def runtime_transaction() -> Iterator[dict[str, Any]]:
         save_runtime(state)
 
 
+def load_settings() -> dict[str, Any]:
+    value = read_json(SETTINGS_FILE, {})
+    return value if isinstance(value, dict) else {}
+
+
+def save_settings(settings: dict[str, Any]) -> None:
+    atomic_json(SETTINGS_FILE, settings)
+
+
+def help_enabled(settings: dict[str, Any] | None = None, rifts: list[dict[str, Any]] | None = None) -> bool:
+    """Help mode is on for brand-new users until they save their first Rift, or
+    whenever they switch it on themselves."""
+    settings = load_settings() if settings is None else settings
+    explicit = settings.get("help")
+    if isinstance(explicit, bool):
+        return explicit
+    return not bool(settings.get("everSaved")) and not (rifts if rifts is not None else load_rifts())
+
+
+def set_help(enabled: bool) -> dict[str, Any]:
+    settings = load_settings()
+    settings["help"] = enabled
+    save_settings(settings)
+    return {"help": enabled}
+
+
+def rename_rift(slug: str, new_name: str) -> dict[str, Any]:
+    rift = load_rift(slug)
+    new_slug = slugify(new_name)
+    if new_slug != rift["slug"] and rift_path(new_slug).exists():
+        raise ValueError(f"A Rift named {new_name.strip()} already exists")
+    old_slug = rift["slug"]
+    rift["name"] = new_name.strip()
+    rift["slug"] = new_slug
+    persist_rift(rift)
+    if new_slug != old_slug:
+        rift_path(old_slug).unlink(missing_ok=True)
+        with runtime_transaction() as runtime:
+            association = runtime.get("open", {}).pop(old_slug, None)
+            if association:
+                runtime["open"][new_slug] = association
+    return rift
+
+
 def state_payload() -> dict[str, Any]:
     workspace = current_workspace()
     apps = current_apps(workspace)
@@ -474,12 +519,20 @@ def state_payload() -> dict[str, Any]:
     current_saved = next((item for item in rifts if item.get("slug") == current_slug), None)
     saved_ids = {app.get("id") for app in (current_saved or {}).get("apps", [])}
     current_ids = {app.get("id") for app in apps if app.get("selected", True)}
+    settings = load_settings()
+    # Tell the panel where every open Rift lives so the entry view can say
+    # "on workspace 7" and only offer Update when you are standing there.
+    open_map = {slug: int(item.get("workspace_id", 0)) for slug, item in runtime.get("open", {}).items()}
+    for rift in rifts:
+        rift["openWorkspace"] = open_map.get(rift.get("slug"), 0)
     return {
         "workspace": {"id": workspace.get("id", 0), "name": workspace.get("name", "")},
         "apps": apps,
         "rifts": rifts,
         "currentRift": current_slug,
         "changed": bool(current_slug and current_saved and saved_ids != current_ids),
+        "help": help_enabled(settings, rifts),
+        "everSaved": bool(settings.get("everSaved")),
     }
 
 
@@ -538,6 +591,10 @@ def save_rift(
         value["history"] = history
         value["previous"] = history[0]
     atomic_json(rift_path(slug), value)
+    settings = load_settings()
+    if not settings.get("everSaved"):
+        settings["everSaved"] = True  # help mode retires itself after the first real Rift
+        save_settings(settings)
     with runtime_transaction() as runtime:
         runtime["open"] = {
             open_slug: association
@@ -679,7 +736,7 @@ def new_workspace() -> dict[str, Any]:
 
 def persist_rift(rift: dict[str, Any]) -> dict[str, Any]:
     """Write a Rift definition, dropping derived fields that must not be stored."""
-    stored = {key: value for key, value in rift.items() if key != "validationErrors"}
+    stored = {key: value for key, value in rift.items() if key not in ("validationErrors", "openWorkspace")}
     atomic_json(rift_path(stored["slug"]), stored)
     return rift
 
@@ -766,6 +823,11 @@ def parser() -> argparse.ArgumentParser:
     delete.add_argument("slug")
     revert = sub.add_parser("revert")
     revert.add_argument("slug")
+    rename = sub.add_parser("rename")
+    rename.add_argument("slug")
+    rename.add_argument("name")
+    help_command = sub.add_parser("help")
+    help_command.add_argument("enabled", choices=["on", "off"])
     sub.add_parser("new-workspace")
     sub.add_parser("startup-open")
     return result
@@ -785,6 +847,10 @@ def main() -> int:
             emit(set_startup(args.slug, args.enabled == "on"))
         elif args.command == "revert":
             emit(revert_rift(args.slug))
+        elif args.command == "rename":
+            emit(rename_rift(args.slug, args.name))
+        elif args.command == "help":
+            emit(set_help(args.enabled == "on"))
         elif args.command == "delete":
             delete_rift(args.slug)
             emit({"deleted": args.slug})

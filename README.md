@@ -11,7 +11,7 @@
 [![Omarchy plugin](https://img.shields.io/badge/Omarchy-bar%20plugin-9d7cd8?style=for-the-badge&logo=archlinux&logoColor=white)](https://omarchy.org)
 [![Hyprland](https://img.shields.io/badge/Hyprland-native-58e1ff?style=for-the-badge)](https://hypr.land)
 [![Zero deps](https://img.shields.io/badge/deps-python3%20%2B%20hyprctl-success?style=for-the-badge)](#requirements)
-[![Version](https://img.shields.io/badge/version-0.2.1-8b5cf6?style=for-the-badge)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.0-8b5cf6?style=for-the-badge)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 
 ```bash
@@ -38,11 +38,10 @@ A *Rift* is a named set of applications. Open it and Rift grabs the next empty w
 
 | You do | Rift does |
 |---|---|
-| Click `󰦛` in the bar → **Save** | Scans the focused workspace, detects every app, resolves it to a launchable recipe, stores it as `~/.config/rift/rifts/<name>.json` |
-| Click a saved Rift | Already open? **Jumps to its workspace.** Not open? **Spawns a fresh workspace and launches everything.** |
-| Toggle **Open at login** | That Rift comes up with your session. Idempotent — locked, marked per Hyprland instance, never double-launches |
-| Standing on a Rift → header shows `󰑐` | **One click re-records** this workspace into that Rift. Changed something? `Revert` puts the previous recipe back (and revert is itself revertible) |
-| Click `＋` on an unsaved workspace | Saves *this* workspace as a new Rift — Rift never drags you off to a different workspace |
+| Click `󰦛` → **Save this workspace as a Rift** | Scans the focused workspace, detects every app, resolves it to a launchable recipe, stores it as `~/.config/rift/rifts/<name>.json` |
+| Click `＋` (always top-right) | **New Rift** chooser: *save what's on this workspace*, or *start on a fresh, empty workspace* and build it there |
+| Click a Rift | Opens its **entry**: every app it holds, where it's open, and the actions — **Open / Go to workspace**, **Update** (only when you're standing on it), **Revert**, **Open at login**, **Delete** (asks twice) |
+| First run | A short **help** walkthrough sits at the top until you save your first Rift. `󰋖` brings it back any time |
 
 ## Why it's smarter than "remember my windows"
 
@@ -62,12 +61,12 @@ The panel is fully keyboard-driven, in the same `KeyboardPanel` style as Omarchy
 | Key | Action |
 |---|---|
 | `↑` `↓` | Move through saved Rifts |
-| `Enter` | Open / focus the selected Rift |
-| `S` | Save the current workspace as a Rift (opens the app picker) |
-| `U` | One-click update the current Rift with what's on the workspace now |
-| `R` | Revert the current Rift to its previous recipe |
-| `N` | New Rift from this workspace |
-| `Esc` | Close |
+| `Enter` | Open the selected Rift's entry |
+| `N` | New Rift chooser (`S` save what's here · `F` fresh workspace) |
+| `S` | Save this workspace as a Rift |
+| `H` | Toggle help |
+| in an entry: `O`/`Enter` open · `U` update · `R` revert · `L` login toggle · `D` `D` delete · `Esc` back |
+| `Esc` | Back / close |
 | `Tab` / `Shift+Tab` | Switch to neighbouring bar popouts |
 
 ## Install
@@ -148,7 +147,9 @@ python3 $H save "API work"             # save focused workspace
 python3 $H open api-work               # focus or launch
 python3 $H startup api-work on|off     # toggle autostart
 python3 $H revert api-work             # swap back to the previous recipe
+python3 $H rename api-work "API v2"    # rename (slug + association follow)
 python3 $H delete api-work             # remove a rift
+python3 $H help on|off                 # help walkthrough in the panel
 python3 $H new-workspace               # jump to next empty workspace
 
 # Drive the panel from a keybind:
@@ -171,7 +172,7 @@ bind = SUPER, R, exec, omarchy-shell nixfred.rift toggle
 
 ## Roadmap
 
-- [ ] Delete / rename from the panel (CLI `delete` exists today)
+- [x] Delete from the panel (rename via CLI for now)
 - [ ] Per-app launch delay & ordering
 - [ ] Optional `exec` override per app in the save panel
 
