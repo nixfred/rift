@@ -2,6 +2,11 @@
 
 All notable changes to Rift. The version shown in the panel header (`RIFTS vX.Y.Z`) and bar tooltip is the one in `manifest.json`; tests keep them in lockstep.
 
+## v0.3.9 — 2026-08-22 · Rift names its workspace
+
+- With the optional `nixfred.workspace-names` plugin installed, opening a Rift names its assigned workspace after the Rift and reopening it restores a missing title
+- Missing or malformed workspace-name files are left untouched and never prevent a Rift from opening
+
 ## v0.3.8 — 2026-08-22 · Grok is a first-class coding AI
 
 - Programs running under an interpreter (`node …/@xai-official/grok/bin/grok --yolo`, bun/deno/python scripts) are captured as the script they are (`grok`) when that name is on PATH, and replayed as the user-facing command
