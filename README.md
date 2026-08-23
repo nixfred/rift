@@ -63,6 +63,8 @@ Honesty section — this is the whole product, so here's exactly what is and isn
 
 A Rift is a **singleton**, and **Open means "make it whole"**: if the Rift is open, Rift focuses its workspace and relaunches any of its own apps that are missing (quit the Claude terminal → Open brings Claude back, leaves Brave alone). A Rift counts as open only while at least one of *its* apps is still on that workspace — an unrelated leftover window doesn't fool it.
 
+With the optional [workspace-names](https://github.com/nixfred/workspace-names) plugin installed, opening a Rift also gives its workspace the Rift's name. Reopening an existing Rift restores that title if it was cleared. Rift leaves missing or invalid workspace-name files untouched.
+
 ## Why it's smarter than "remember my windows"
 
 - **Terminals remember their directory.** Ghostty, Kitty, Alacritty, Foot, WezTerm — Rift reads `/proc/<pid>/cwd` and relaunches the terminal *in the same project folder*. Your shell is back where you left it.

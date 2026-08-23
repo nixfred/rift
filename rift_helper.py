@@ -30,6 +30,13 @@ RIFTS_ROOT = CONFIG_ROOT / "rifts"
 STATE_ROOT = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "rift"
 RUNTIME_FILE = STATE_ROOT / "runtime.json"
 SETTINGS_FILE = CONFIG_ROOT / "settings.json"
+WORKSPACE_NAMES_FILE = Path(
+    os.environ.get(
+        "WORKSPACE_NAMES_FILE",
+        Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        / "omarchy/workspace-names.json",
+    )
+)
 
 IGNORED_CLASSES = {
     "omarchy-shell",
@@ -118,6 +125,26 @@ def read_json(path: Path, fallback: Any) -> Any:
         return json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return fallback
+
+
+def restore_workspace_title(workspace_id: int, name: str) -> bool:
+    """Give an opened Rift's numeric workspace its human-friendly name.
+
+    workspace-names is an optional companion plugin, so a missing file or an
+    invalid payload must never stop Rift from opening applications. When the
+    file exists, use the same atomic replacement contract as that plugin.
+    """
+    if workspace_id <= 0 or not name.strip() or not WORKSPACE_NAMES_FILE.is_file():
+        return False
+    names = read_json(WORKSPACE_NAMES_FILE, None)
+    if not isinstance(names, dict):
+        return False
+    names[str(workspace_id)] = name.strip()
+    try:
+        atomic_json(WORKSPACE_NAMES_FILE, names)
+    except OSError:
+        return False
+    return True
 
 
 def hypr_json(subject: str) -> Any:
@@ -1139,6 +1166,7 @@ def open_rift(slug: str) -> dict[str, Any]:
     association = (runtime.get("open") or {}).get(rift["slug"])
     if association:
         hypr_dispatch("workspace", str(association["workspace_id"]))
+        restore_workspace_title(int(association["workspace_id"]), str(rift.get("name", "")))
         pending = set(association.get("failed_apps", []))
         if pending:
             wait_for_workspace(int(association["workspace_id"]))
@@ -1221,6 +1249,7 @@ def open_rift(slug: str) -> dict[str, Any]:
             locked["open"][rift["slug"]]["failed_apps"] = [
                 result["app"] for result in results if result["status"] == "failed"
             ]
+    restore_workspace_title(workspace_id, str(rift.get("name", "")))
     return {
         "action": "partial" if failed else "opened",
         "rift": rift["slug"],

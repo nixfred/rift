@@ -24,7 +24,10 @@ class RiftHelperTests(unittest.TestCase):
         self.rifts = patch.object(rift, "RIFTS_ROOT", root / "config/rifts")
         self.state = patch.object(rift, "STATE_ROOT", root / "state")
         self.runtime = patch.object(rift, "RUNTIME_FILE", root / "state/runtime.json")
-        for item in (self.config, self.rifts, self.state, self.runtime):
+        self.workspace_names = patch.object(
+            rift, "WORKSPACE_NAMES_FILE", root / "omarchy/workspace-names.json"
+        )
+        for item in (self.config, self.rifts, self.state, self.runtime, self.workspace_names):
             item.start()
 
     def tearDown(self):
@@ -157,6 +160,38 @@ class RiftHelperTests(unittest.TestCase):
         dispatch.assert_called_once_with("workspace", "7")
         launch.assert_not_called()
         self.assertEqual(result["action"], "focused")
+
+    def test_open_existing_rift_restores_its_workspace_title(self):
+        rift.ensure_dirs()
+        rift.WORKSPACE_NAMES_FILE.parent.mkdir(parents=True)
+        rift.atomic_json(rift.WORKSPACE_NAMES_FILE, {"_config": {"pill": True}, "2": "Other"})
+        rift.atomic_json(
+            rift.rift_path("nova"),
+            {"schemaVersion": 1, "slug": "nova", "name": "Project Nova", "apps": [{"id": "editor"}]},
+        )
+        rift.atomic_json(
+            rift.RUNTIME_FILE,
+            {
+                "signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+                "open": {"nova": {"workspace_id": 7, "workspace_name": "7"}},
+            },
+        )
+        with patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}]), patch.object(
+            rift, "hypr_dispatch"
+        ):
+            rift.open_rift("nova")
+
+        names = rift.read_json(rift.WORKSPACE_NAMES_FILE, {})
+        self.assertEqual(names["7"], "Project Nova")
+        self.assertEqual(names["2"], "Other")
+        self.assertEqual(names["_config"], {"pill": True})
+
+    def test_workspace_title_is_optional_and_invalid_files_are_preserved(self):
+        self.assertFalse(rift.restore_workspace_title(4, "Nova"))
+        rift.WORKSPACE_NAMES_FILE.parent.mkdir(parents=True)
+        rift.WORKSPACE_NAMES_FILE.write_text("not json\n")
+        self.assertFalse(rift.restore_workspace_title(4, "Nova"))
+        self.assertEqual(rift.WORKSPACE_NAMES_FILE.read_text(), "not json\n")
 
     def test_runtime_state_survives_transient_workspace_query_failure(self):
         expected = {
@@ -933,6 +968,8 @@ class RiftHelperTests(unittest.TestCase):
             {"app": "editor", "status": "launched"},
             {"app": "missing", "status": "failed", "error": "not found"},
         ]
+        rift.WORKSPACE_NAMES_FILE.parent.mkdir(parents=True)
+        rift.atomic_json(rift.WORKSPACE_NAMES_FILE, {})
         with patch.object(rift, "load_rift", return_value=saved), patch.object(
             rift, "runtime_state", return_value=runtime
         ), patch.object(rift, "save_runtime"), patch.object(
@@ -950,6 +987,7 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual((result["launched"], result["failed"]), (1, 1))
         self.assertEqual(runtime["open"]["nova"]["workspace_id"], 9)
         self.assertEqual(runtime["open"]["nova"]["failed_apps"], ["missing"])
+        self.assertEqual(rift.read_json(rift.WORKSPACE_NAMES_FILE, {})["9"], "Nova")
 
     def test_open_rift_retries_failed_apps_on_existing_workspace(self):
         saved = {"slug": "nova", "name": "Nova", "apps": [{"id": "editor"}, {"id": "missing"}]}
