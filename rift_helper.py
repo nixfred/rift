@@ -447,26 +447,33 @@ def desktop_exec_binary(exec_line: str) -> str:
     return tokens[index]
 
 
-def desktop_entries() -> list[dict[str, str]]:
-    roots = [Path.home() / ".local/share/applications", Path("/usr/share/applications")]
+def desktop_entries(roots: list[Path] | None = None) -> list[dict[str, str]]:
+    if roots is None:
+        roots = [Path.home() / ".local/share/applications", Path("/usr/share/applications")]
     entries: list[dict[str, str]] = []
+    seen: set[str] = set()
     for root in roots:
         if not root.is_dir():
             continue
         for path in root.rglob("*.desktop"):
+            desktop_id = path.relative_to(root).as_posix().removesuffix(".desktop").replace("/", "-")
+            if desktop_id in seen:
+                continue
+            seen.add(desktop_id)
             parser = configparser.ConfigParser(interpolation=None, strict=False)
             try:
                 parser.read(path, encoding="utf-8")
                 section = parser["Desktop Entry"]
-            except (OSError, KeyError, configparser.Error):
+                hidden = section.getboolean("NoDisplay", fallback=False) or section.getboolean("Hidden", fallback=False)
+            except (OSError, KeyError, ValueError, configparser.Error):
                 continue
-            if section.get("Type", "Application") != "Application" or section.getboolean("NoDisplay", fallback=False):
+            if section.get("Type", "Application") != "Application" or hidden:
                 continue
             exec_line = section.get("Exec", "").strip()
             exec_token = desktop_exec_binary(exec_line)
             entries.append(
                 {
-                    "id": path.name.removesuffix(".desktop"),
+                    "id": desktop_id,
                     "name": section.get("Name", path.stem),
                     "startup_class": section.get("StartupWMClass", ""),
                     "exec": Path(exec_token).name,
@@ -1106,7 +1113,7 @@ def wait_for_workspace(target_id: int, timeout: float = 2.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while True:
         workspace = current_workspace()
-        if int(workspace.get("id", 0) or 0) == target_id:
+        if numeric_id(workspace.get("id")) == target_id:
             return workspace
         if time.monotonic() >= deadline:
             raise RuntimeError(f"Timed out waiting for workspace {target_id}")

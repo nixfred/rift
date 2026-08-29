@@ -823,6 +823,76 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(rift.desktop_exec_binary("env --split-string editor --flag"), "")
         self.assertEqual(rift.desktop_exec_binary("%F"), "")
 
+    def test_desktop_entries_skip_invalid_no_display_boolean(self):
+        home = Path(self.temp.name) / "home"
+        applications = home / ".local/share/applications"
+        applications.mkdir(parents=True)
+        (applications / "broken.desktop").write_text(
+            "[Desktop Entry]\nName=Broken\nType=Application\nNoDisplay=not-a-boolean\nExec=broken\n"
+        )
+
+        with patch.object(rift.Path, "home", return_value=home):
+            entries = rift.desktop_entries()
+
+        self.assertNotIn("broken", {entry["id"] for entry in entries})
+
+    def test_desktop_entries_skip_hidden_tombstones(self):
+        home = Path(self.temp.name) / "home"
+        applications = home / ".local/share/applications"
+        applications.mkdir(parents=True)
+        (applications / "removed.desktop").write_text(
+            "[Desktop Entry]\nName=Removed\nType=Application\nHidden=true\nExec=removed\n"
+        )
+
+        with patch.object(rift.Path, "home", return_value=home):
+            entries = rift.desktop_entries()
+
+        self.assertNotIn("removed", {entry["id"] for entry in entries})
+
+    def test_desktop_entries_hidden_user_entry_masks_system_entry(self):
+        root = Path(self.temp.name)
+        local = root / "local"
+        system = root / "system"
+        local.mkdir()
+        system.mkdir()
+        (local / "editor.desktop").write_text(
+            "[Desktop Entry]\nName=Removed Editor\nType=Application\nHidden=true\n"
+        )
+        (system / "editor.desktop").write_text(
+            "[Desktop Entry]\nName=System Editor\nType=Application\nExec=editor\n"
+        )
+
+        entries = rift.desktop_entries([local, system])
+
+        self.assertNotIn("editor", {entry["id"] for entry in entries})
+
+    def test_desktop_entries_nested_user_entry_masks_same_system_desktop_id(self):
+        root = Path(self.temp.name)
+        local = root / "local"
+        system = root / "system"
+        (local / "vendor").mkdir(parents=True)
+        system.mkdir()
+        (local / "vendor/editor.desktop").write_text(
+            "[Desktop Entry]\nName=User Editor\nType=Application\nExec=user-editor\n"
+        )
+        (system / "vendor-editor.desktop").write_text(
+            "[Desktop Entry]\nName=System Editor\nType=Application\nExec=system-editor\n"
+        )
+
+        entries = rift.desktop_entries([local, system])
+
+        self.assertEqual(
+            entries,
+            [
+                {
+                    "id": "vendor-editor",
+                    "name": "User Editor",
+                    "startup_class": "",
+                    "exec": "user-editor",
+                }
+            ],
+        )
+
     def test_launch_fails_when_recorded_cwd_is_gone(self):
         app = {
             "id": "terminal:kitty:/gone:claude",
@@ -978,7 +1048,7 @@ class RiftHelperTests(unittest.TestCase):
         with patch.object(
             rift,
             "current_workspace",
-            side_effect=[{"id": 2, "name": "2"}, {"id": 9, "name": "9"}],
+            side_effect=[{"id": "unknown", "name": "?"}, {"id": 9, "name": "9"}],
         ), patch.object(rift.time, "sleep"):
             self.assertEqual(rift.wait_for_workspace(9), {"id": 9, "name": "9"})
 
