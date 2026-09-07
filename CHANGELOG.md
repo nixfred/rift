@@ -2,6 +2,27 @@
 
 All notable changes to Rift. The version shown in the panel header (`RIFTS vX.Y.Z`) and bar tooltip is the one in `manifest.json`; tests keep them in lockstep.
 
+## v0.3.8 — 2026-08-22 · Grok is a first-class coding AI
+
+- Programs running under an interpreter (`node …/@xai-official/grok/bin/grok --yolo`, bun/deno/python scripts) are captured as the script they are (`grok`) when that name is on PATH, and replayed as the user-facing command
+- **Grok resumes**: `grok … --continue` (most recent session for that directory), same contract as Claude Code. Fred's three coding AIs — Claude Code, Codex, Grok — all come back with their working directory
+
+## v0.3.7 — 2026-08-22 · Codex resumes the right session
+
+- `codex resume --last` is the *global* last session (thanks Grok for flagging it). Rift now late-binds at launch: it scans `~/.codex/sessions/**` for the newest session whose `cwd` is the app's directory and runs `codex resume <id>`; with no session for that directory it starts Codex fresh there — never some other project's session. Saved recipes are unchanged
+
+## v0.3.6 — 2026-08-21 · Capture through multi-threaded wrappers
+
+- `child_pids` unions the `children` of every thread: `kitten run-shell` (and other Go/Rust wrappers) fork from worker threads, so Rift-launched terminals (`kitty --hold claude …`) previously looked empty and an Update degraded them to a bare terminal. Verified live: `kitty → kitten run-shell → btop` now captures `btop`
+
+## v0.3.5 — 2026-08-21 · Open means whole (CORE)
+
+Fred quit the `voice` Rift's terminal, opened the Rift from elsewhere, and got a focus instead of Claude. Three fixes:
+
+- **Open repairs**: opening an open Rift focuses it *and relaunches every app of its own that's missing* (`repaired` result); apps still there are left alone
+- **Liveness is about the Rift's apps**: an association survives only while at least one of the Rift's own app classes is on that workspace — a leftover unrelated window no longer keeps a closed Rift "open"
+- **Capture without a shell**: terminals Rift launched itself (`kitty --hold claude …`) have no shell under them and no tty on the emulator; the foreground program is now found among the terminal's direct children, so updating such a Rift keeps `claude`/`codex` instead of degrading to a bare terminal
+
 ## v0.3.4 — 2026-08-21 · Rename in the entry (#16)
 
 - **Rename** button / `E` in a Rift's entry: inline field, Enter saves, Esc cancels; slug, file and workspace association follow (helper `rename`)

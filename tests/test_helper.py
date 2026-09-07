@@ -1,4 +1,5 @@
 import importlib.util
+import re
 import tempfile
 import threading
 import time
@@ -29,6 +30,13 @@ class RiftHelperTests(unittest.TestCase):
     def tearDown(self):
         patch.stopall()
         self.temp.cleanup()
+
+    def test_panel_open_and_close_reset_rename_mode(self):
+        panel = (Path(__file__).parents[1] / "Panel.qml").read_text()
+        for function in ("open", "close"):
+            body = re.search(rf"function {function}\(\) \{{(.*?)\n  \}}", panel, re.DOTALL)
+            self.assertIsNotNone(body)
+            self.assertIn("renaming = false", body.group(1))
 
     def test_save_records_selected_apps_and_workspace_association(self):
         apps = [
@@ -436,11 +444,12 @@ class RiftHelperTests(unittest.TestCase):
         ), patch.object(rift, "hypr_json", return_value=[{"id": 7, "windows": 1}, {"id": 10, "windows": 1}]):
             with self.assertRaisesRegex(RuntimeError, "already exists"):
                 rift.save_rift("Nova")
+            # inside the patch: outside it the liveness rule asks the real compositor
+            self.assertEqual(rift.runtime_state()["open"]["nova"]["workspace_id"], 7)
 
         stored = rift.read_json(rift.rift_path("nova"), {})
         self.assertEqual(stored["apps"][0]["id"], "keep")
         self.assertTrue(stored["startup"])
-        self.assertEqual(rift.runtime_state()["open"]["nova"]["workspace_id"], 7)
 
     def test_save_update_of_still_rewrites_the_intended_rift(self):
         with patch.object(rift, "current_workspace", return_value={"id": 7, "name": "7"}), patch.object(
@@ -693,6 +702,96 @@ class RiftHelperTests(unittest.TestCase):
         rift.set_startup("nova", True)
         self.assertNotIn("failedApps", rift.read_json(rift.rift_path("nova"), {}))
 
+    def test_terminal_session_without_shell_finds_direct_program(self):
+        # Rift's own recipe: kitty(100) --hold claude → claude(200); no shell, kitty has no tty.
+        tree = {100: [200]}
+        comm = {200: "claude"}
+        info = {100: ("/usr/bin/kitty", ["kitty"], "/home/pi"), 200: ("/opt/claude", ["claude", "--continue"], "/home/pi/Projects/voice")}
+        with patch.object(rift, "child_pids", side_effect=lambda pid: tree.get(pid, [])), patch.object(
+            rift, "proc_comm", side_effect=lambda pid: comm.get(pid, "")
+        ), patch.object(rift, "process_info", side_effect=lambda pid: info.get(pid, ("", [], ""))), patch.object(
+            rift, "proc_ids", return_value=(1, 100, -1)
+        ):
+            session = rift.terminal_session(100)
+        self.assertEqual(session["program"], "claude")
+        self.assertEqual(session["cwd"], "/home/pi/Projects/voice")
+
+    def _fake_hypr(self, workspaces, clients):
+        def fake(subject):
+            return {"workspaces": workspaces, "clients": clients, "activeworkspace": workspaces[0] if workspaces else {}}[subject]
+        return fake
+
+    def test_association_dies_when_the_rifts_own_apps_are_gone(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.rift_path("voice"), {"schemaVersion": 1, "slug": "voice", "name": "voice",
+                         "apps": [{"id": "t", "class": "kitty", "launch": ["kitty"]}]})
+        rift.atomic_json(rift.RUNTIME_FILE, {"signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+                         "open": {"voice": {"workspace_id": 6, "workspace_name": "6"}}})
+        # workspace 6 still has a window, but it's Brave, not our kitty → closed
+        with patch.object(rift, "hypr_json", side_effect=self._fake_hypr(
+            [{"id": 6, "windows": 1}], [{"workspace": {"id": 6}, "class": "brave-browser"}])):
+            self.assertEqual(rift.runtime_state()["open"], {})
+        # our kitty is there → still open
+        with patch.object(rift, "hypr_json", side_effect=self._fake_hypr(
+            [{"id": 6, "windows": 2}], [{"workspace": {"id": 6}, "class": "kitty"}, {"workspace": {"id": 6}, "class": "brave-browser"}])):
+            self.assertIn("voice", rift.runtime_state()["open"])
+
+    def test_open_repairs_missing_apps_of_an_open_rift(self):
+        rift.ensure_dirs()
+        rift.atomic_json(rift.rift_path("dev"), {"schemaVersion": 1, "slug": "dev", "name": "Dev", "apps": [
+            {"id": "t", "class": "kitty", "launch": ["kitty", "claude"]},
+            {"id": "b", "class": "brave-browser", "launch": ["gtk-launch", "brave-browser"]}]})
+        rift.atomic_json(rift.RUNTIME_FILE, {"signature": rift.os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+                         "open": {"dev": {"workspace_id": 4, "workspace_name": "4"}}})
+        fake = self._fake_hypr([{"id": 4, "windows": 1}], [{"workspace": {"id": 4}, "class": "brave-browser"}])
+        launched = []
+        with patch.object(rift, "hypr_json", side_effect=fake), patch.object(rift, "hypr_dispatch"), patch.object(
+            rift, "wait_for_workspace", return_value={"id": 4}
+        ), patch.object(rift, "launch_app_result", side_effect=lambda app, r: (launched.append(app["id"]) or {"app": app["id"], "status": "launched"})):
+            result = rift.open_rift("dev")
+        self.assertEqual(result["action"], "repaired")
+        self.assertEqual(launched, ["t"])
+        self.assertEqual(result["launched"], 1)
+
+    def test_process_info_never_returns_a_proc_path_as_cwd(self):
+        class FakePath:
+            def __init__(self, parts): self.parts = parts
+            def __truediv__(self, other): return FakePath(self.parts + [other])
+            def resolve(self): return "/proc/123/cwd" if self.parts[-1] == "cwd" else "/usr/bin/x"
+            def read_bytes(self): return b"x\0"
+        with patch.object(rift, "Path", lambda *a: FakePath(list(a))):
+            _exe, _argv, cwd = rift.process_info(123)
+        self.assertEqual(cwd, "")
+
+    def test_codex_resume_binds_to_the_session_for_this_directory(self):
+        home = Path(self.temp.name) / "codex"
+        day = home / "sessions" / "2026" / "08" / "21"
+        day.mkdir(parents=True)
+        def write(name, cwd, stamp, sid):
+            (day / name).write_text(rift.json.dumps({"type": "session_meta", "payload": {"cwd": cwd, "timestamp": stamp, "session_id": sid}}) + "\n{\"type\":\"x\"}\n")
+        write("rollout-a.jsonl", "/p/one", "2026-08-21T01:00:00Z", "old-one")
+        write("rollout-b.jsonl", "/p/one", "2026-08-21T02:00:00Z", "new-one")
+        write("rollout-c.jsonl", "/p/two", "2026-08-21T03:00:00Z", "global-last")
+        with patch.object(rift, "CODEX_HOME", home):
+            self.assertEqual(rift.codex_session_for("/p/one"), "new-one")
+            self.assertEqual(rift.resolve_launch(["kitty", "--hold", "codex", "resume", "--last"], "/p/one"),
+                             ["kitty", "--hold", "codex", "resume", "new-one"])
+            # no session for this directory → fresh codex here, never someone else's last
+            self.assertEqual(rift.resolve_launch(["kitty", "--hold", "codex", "resume", "--last"], "/p/none"),
+                             ["kitty", "--hold", "codex"])
+            self.assertEqual(rift.resolve_launch(["kitty", "claude", "--continue"], "/p/one"), ["kitty", "claude", "--continue"])
+
+    def test_grok_under_node_is_captured_and_resumed(self):
+        argv = ["node", "/x/node_modules/@xai-official/grok/bin/grok", "--yolo"]
+        with patch.object(rift.shutil, "which", side_effect=lambda name: "/bin/" + name if name == "grok" else None):
+            program, replay = rift.unwrap_interpreter(argv)
+            self.assertEqual((program, replay), ("grok", ["grok", "--yolo"]))
+            self.assertEqual(rift.resume_command({"program": program, "command": replay}), ["grok", "--yolo", "--continue"])
+        # unknown script not on PATH: keep argv as-is, program = script name
+        with patch.object(rift.shutil, "which", return_value=None):
+            self.assertEqual(rift.unwrap_interpreter(["node", "/srv/app/server.js"]), ("server.js", ["node", "/srv/app/server.js"]))
+        self.assertEqual(rift.unwrap_interpreter(["claude", "-c"]), ("claude", ["claude", "-c"]))
+
     def test_terminal_recipe_keeps_project_directory(self):
         self.assertEqual(
             rift.terminal_recipe("ghostty", "/tmp/nova"),
@@ -723,6 +822,76 @@ class RiftHelperTests(unittest.TestCase):
         self.assertEqual(rift.desktop_exec_binary('"unterminated'), "")
         self.assertEqual(rift.desktop_exec_binary("env --split-string editor --flag"), "")
         self.assertEqual(rift.desktop_exec_binary("%F"), "")
+
+    def test_desktop_entries_skip_invalid_no_display_boolean(self):
+        home = Path(self.temp.name) / "home"
+        applications = home / ".local/share/applications"
+        applications.mkdir(parents=True)
+        (applications / "broken.desktop").write_text(
+            "[Desktop Entry]\nName=Broken\nType=Application\nNoDisplay=not-a-boolean\nExec=broken\n"
+        )
+
+        with patch.object(rift.Path, "home", return_value=home):
+            entries = rift.desktop_entries()
+
+        self.assertNotIn("broken", {entry["id"] for entry in entries})
+
+    def test_desktop_entries_skip_hidden_tombstones(self):
+        home = Path(self.temp.name) / "home"
+        applications = home / ".local/share/applications"
+        applications.mkdir(parents=True)
+        (applications / "removed.desktop").write_text(
+            "[Desktop Entry]\nName=Removed\nType=Application\nHidden=true\nExec=removed\n"
+        )
+
+        with patch.object(rift.Path, "home", return_value=home):
+            entries = rift.desktop_entries()
+
+        self.assertNotIn("removed", {entry["id"] for entry in entries})
+
+    def test_desktop_entries_hidden_user_entry_masks_system_entry(self):
+        root = Path(self.temp.name)
+        local = root / "local"
+        system = root / "system"
+        local.mkdir()
+        system.mkdir()
+        (local / "editor.desktop").write_text(
+            "[Desktop Entry]\nName=Removed Editor\nType=Application\nHidden=true\n"
+        )
+        (system / "editor.desktop").write_text(
+            "[Desktop Entry]\nName=System Editor\nType=Application\nExec=editor\n"
+        )
+
+        entries = rift.desktop_entries([local, system])
+
+        self.assertNotIn("editor", {entry["id"] for entry in entries})
+
+    def test_desktop_entries_nested_user_entry_masks_same_system_desktop_id(self):
+        root = Path(self.temp.name)
+        local = root / "local"
+        system = root / "system"
+        (local / "vendor").mkdir(parents=True)
+        system.mkdir()
+        (local / "vendor/editor.desktop").write_text(
+            "[Desktop Entry]\nName=User Editor\nType=Application\nExec=user-editor\n"
+        )
+        (system / "vendor-editor.desktop").write_text(
+            "[Desktop Entry]\nName=System Editor\nType=Application\nExec=system-editor\n"
+        )
+
+        entries = rift.desktop_entries([local, system])
+
+        self.assertEqual(
+            entries,
+            [
+                {
+                    "id": "vendor-editor",
+                    "name": "User Editor",
+                    "startup_class": "",
+                    "exec": "user-editor",
+                }
+            ],
+        )
 
     def test_launch_fails_when_recorded_cwd_is_gone(self):
         app = {
@@ -879,7 +1048,7 @@ class RiftHelperTests(unittest.TestCase):
         with patch.object(
             rift,
             "current_workspace",
-            side_effect=[{"id": 2, "name": "2"}, {"id": 9, "name": "9"}],
+            side_effect=[{"id": "unknown", "name": "?"}, {"id": 9, "name": "9"}],
         ), patch.object(rift.time, "sleep"):
             self.assertEqual(rift.wait_for_workspace(9), {"id": 9, "name": "9"})
 

@@ -180,6 +180,8 @@ def process_info(pid: int) -> tuple[str, list[str], str]:
         cwd = str((proc / "cwd").resolve())
     except OSError:
         cwd = ""
+    if cwd.startswith("/proc/") or not cwd.startswith("/"):
+        cwd = ""  # symlink could not be resolved (process mid-exec or gone); unknown, not "/proc/…"
     return executable, argv, cwd
 
 
@@ -195,7 +197,10 @@ SHELLS = {"bash", "zsh", "fish", "sh", "dash", "nu", "nushell", "elvish", "xonsh
 TERMINAL_HELPERS = {"kitten", "ghostty", "alacritty", "foot", "wezterm-gui", "wezterm", "kitty"}
 # Programs that know how to pick their own session back up. The recipe we
 # replay is argv with the resume flag appended, so Fred's wrapper flags survive.
-RESUMABLE = {"claude", "codex"}
+RESUMABLE = {"claude", "codex", "grok"}
+# Coding AIs and other CLIs often run as `node …/bin/grok --yolo`; the real
+# program is the script, and it is on PATH under that name. See through it.
+INTERPRETERS = {"node", "nodejs", "bun", "deno", "python", "python3", "uv", "npx", "bunx"}
 # `claude [options] [command] [prompt]` — these positionals are admin CLIs,
 # not an interactive coding session. Replaying them with --continue is wrong.
 CLAUDE_SUBCOMMANDS = {
@@ -226,11 +231,32 @@ GUI_ARGV_APPS = {"code", "code-oss", "codium", "cursor", "zed", "zeditor", "wind
 
 
 def child_pids(pid: int) -> list[int]:
+    # Union the children of EVERY thread: multi-threaded parents (kitten
+    # run-shell, Go/Rust helpers) fork from worker threads, so the main
+    # thread's children file is empty even though `pgrep -P` sees the child.
+    task_dir = Path("/proc") / str(pid) / "task"
     try:
-        text = (Path("/proc") / str(pid) / "task" / str(pid) / "children").read_text()
-        return [int(part) for part in text.split()]
-    except (OSError, ValueError):
-        pass
+        tasks = list(task_dir.iterdir())
+    except OSError:
+        tasks = []
+    if tasks:
+        found: list[int] = []
+        readable = False
+        for task in tasks:
+            try:
+                text = (task / "children").read_text()
+            except (OSError, ValueError):
+                continue
+            readable = True
+            for part in text.split():
+                try:
+                    value = int(part)
+                except ValueError:
+                    continue
+                if value not in found:
+                    found.append(value)
+        if readable:
+            return found
     result = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
@@ -262,12 +288,31 @@ def proc_ids(pid: int) -> tuple[int, int, int] | None:
         return None
 
 
+def unwrap_interpreter(argv: list[str]) -> tuple[str, list[str]]:
+    """('grok', ['grok', '--yolo']) for ['node', '/…/@xai-official/grok/bin/grok', '--yolo'].
+
+    Only rewrites argv when the script's basename is itself on PATH, so the
+    replayed recipe is the user-facing command and survives version bumps.
+    """
+    if not argv:
+        return "", argv
+    head = Path(argv[0]).name
+    if head.startswith("python") and head not in INTERPRETERS:
+        head = "python"
+    if head in INTERPRETERS and len(argv) > 1 and not argv[1].startswith("-"):
+        script = Path(argv[1]).name
+        if script and shutil.which(script):
+            return script, [script, *argv[2:]]
+        return script or head, argv
+    return Path(argv[0]).name, argv
+
+
 def capture_program(pid: int, fallback_cwd: str) -> dict[str, Any] | None:
     _executable, argv, cwd = process_info(pid)
     comm = proc_comm(pid)
     if not argv or comm in SHELLS or comm in TERMINAL_HELPERS:
         return None
-    program = Path(argv[0]).name
+    program, argv = unwrap_interpreter(argv)
     if program in SHELLS or program in TERMINAL_HELPERS:
         return None
     return {"command": argv, "program": program, "cwd": cwd or fallback_cwd}
@@ -305,14 +350,29 @@ def terminal_session(pid: int) -> dict[str, Any]:
     _exe, _argv, target_cwd = process_info(target)
     session["cwd"] = target_cwd
     ids = proc_ids(target)
-    if not ids:
+    if ids:
+        _ppid, _pgrp, tpgid = ids
+        if tpgid > 0 and tpgid != target:
+            captured = capture_program(tpgid, target_cwd)
+            if captured:
+                session.update(captured)
+                return session
+    if shell_pid:
         return session
-    _ppid, _pgrp, tpgid = ids
-    if tpgid <= 0 or tpgid == target:
-        return session
-    captured = capture_program(tpgid, target_cwd)
-    if captured:
-        session.update(captured)
+    # No shell at all: the terminal runs the program directly — exactly what
+    # Rift's own recipes do (`kitty --hold claude …`). The emulator is a GUI
+    # process with no controlling tty, so tpgid says nothing; take the first
+    # real program among its children instead (depth 2 for helper wrappers).
+    frontier = list(child_pids(pid))
+    for _depth in range(2):
+        next_frontier: list[int] = []
+        for child in frontier:
+            captured = capture_program(child, target_cwd)
+            if captured:
+                session.update(captured)
+                return session
+            next_frontier.extend(child_pids(child))
+        frontier = next_frontier
     return session
 
 
@@ -336,6 +396,11 @@ def resume_command(session: dict[str, Any]) -> list[str]:
             break
         # --continue picks up the most recent conversation in this directory,
         # so a Claude Code session really does come back as that session.
+        if not any(flag in argv for flag in ("--continue", "-c", "--resume", "-r")):
+            argv = argv + ["--continue"]
+        return argv
+    if program == "grok":
+        # grok -c / --continue: most recent session for the current working directory.
         if not any(flag in argv for flag in ("--continue", "-c", "--resume", "-r")):
             argv = argv + ["--continue"]
         return argv
@@ -382,26 +447,33 @@ def desktop_exec_binary(exec_line: str) -> str:
     return tokens[index]
 
 
-def desktop_entries() -> list[dict[str, str]]:
-    roots = [Path.home() / ".local/share/applications", Path("/usr/share/applications")]
+def desktop_entries(roots: list[Path] | None = None) -> list[dict[str, str]]:
+    if roots is None:
+        roots = [Path.home() / ".local/share/applications", Path("/usr/share/applications")]
     entries: list[dict[str, str]] = []
+    seen: set[str] = set()
     for root in roots:
         if not root.is_dir():
             continue
         for path in root.rglob("*.desktop"):
+            desktop_id = path.relative_to(root).as_posix().removesuffix(".desktop").replace("/", "-")
+            if desktop_id in seen:
+                continue
+            seen.add(desktop_id)
             parser = configparser.ConfigParser(interpolation=None, strict=False)
             try:
                 parser.read(path, encoding="utf-8")
                 section = parser["Desktop Entry"]
-            except (OSError, KeyError, configparser.Error):
+                hidden = section.getboolean("NoDisplay", fallback=False) or section.getboolean("Hidden", fallback=False)
+            except (OSError, KeyError, ValueError, configparser.Error):
                 continue
-            if section.get("Type", "Application") != "Application" or section.getboolean("NoDisplay", fallback=False):
+            if section.get("Type", "Application") != "Application" or hidden:
                 continue
             exec_line = section.get("Exec", "").strip()
             exec_token = desktop_exec_binary(exec_line)
             entries.append(
                 {
-                    "id": path.name.removesuffix(".desktop"),
+                    "id": desktop_id,
                     "name": section.get("Name", path.stem),
                     "startup_class": section.get("StartupWMClass", ""),
                     "exec": Path(exec_token).name,
@@ -670,6 +742,44 @@ def normalized_runtime_state(value: Any, signature: str) -> dict[str, Any]:
     return {"signature": signature, "open": valid}
 
 
+def workspace_classes() -> dict[int, set[str]] | None:
+    """Window classes present per workspace, or None when clients can't be read."""
+    try:
+        clients = hypr_json("clients")
+    except Exception:
+        return None
+    result: dict[int, set[str]] = {}
+    usable = False
+    for client in clients if isinstance(clients, list) else []:
+        if not isinstance(client, dict) or not isinstance(client.get("workspace"), dict):
+            continue
+        usable = True
+        workspace_id = numeric_id(client["workspace"].get("id"))
+        for key in ("class", "initialClass"):
+            value = str(client.get(key) or "").strip().casefold()
+            if value:
+                result.setdefault(workspace_id, set()).add(value)
+    return result if usable else None
+
+
+def rift_classes(rift: dict[str, Any] | None) -> set[str]:
+    return {
+        str(app.get("class") or "").strip().casefold()
+        for app in (rift or {}).get("apps", [])
+        if str(app.get("class") or "").strip()
+    }
+
+
+def rift_present_on(rift: dict[str, Any] | None, workspace_id: int, classes: dict[int, set[str]] | None) -> bool:
+    """Is at least one of this Rift's own apps still on that workspace?"""
+    if classes is None:
+        return True  # can't tell; caller falls back to window counts
+    wanted = rift_classes(rift)
+    if not wanted:
+        return True
+    return bool(wanted & classes.get(workspace_id, set()))
+
+
 def runtime_state() -> dict[str, Any]:
     signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
     state = normalized_runtime_state(read_json(RUNTIME_FILE, None), signature)
@@ -684,9 +794,15 @@ def runtime_state() -> dict[str, Any]:
         }
     except Exception:
         return state
+    # Stricter still: a Rift is only "open" while at least one of ITS apps is
+    # on that workspace. Quit the Claude terminal and leave an unrelated
+    # window behind → the Rift is closed, and Open must relaunch, not focus.
+    classes = workspace_classes()
+    rifts_by_slug = {item.get("slug"): item for item in load_rifts()} if classes is not None else {}
     state["open"] = {
         slug: item for slug, item in (state.get("open") or {}).items()
         if int((item or {}).get("workspace_id", 0)) in live_ids
+        and rift_present_on(rifts_by_slug.get(slug), int((item or {}).get("workspace_id", 0)), classes)
     }
     return state
 
@@ -879,6 +995,50 @@ def app_is_running(app: dict[str, Any]) -> bool:
     return app_running_state(app) == "present"
 
 
+CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+
+
+def codex_session_for(cwd: str) -> str:
+    """Newest Codex session id whose recorded cwd is exactly this directory, or ''.
+
+    `codex resume --last` is the GLOBAL last session — wrong Rift, wrong project.
+    Codex writes session_meta (cwd, session_id) as the first line of each
+    rollout JSONL, so we can pick the right one at launch time.
+    """
+    sessions = CODEX_HOME / "sessions"
+    if not cwd or not sessions.is_dir():
+        return ""
+    best: tuple[str, str] = ("", "")
+    for path in sessions.rglob("rollout-*.jsonl"):
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as stream:
+                first = stream.readline()
+            meta = json.loads(first)
+            payload = meta.get("payload") or {}
+            if meta.get("type") != "session_meta" or str(payload.get("cwd") or "") != cwd:
+                continue
+            stamp = str(payload.get("timestamp") or meta.get("timestamp") or "")
+            session_id = str(payload.get("session_id") or payload.get("id") or "")
+            if session_id and stamp > best[0]:
+                best = (stamp, session_id)
+        except (OSError, ValueError, AttributeError):
+            continue
+    return best[1]
+
+
+def resolve_launch(argv: list[str], cwd: str) -> list[str]:
+    """Late-bind resume recipes to the session that belongs to this directory."""
+    argv = list(argv)
+    for index in range(len(argv) - 2):
+        if Path(argv[index]).name == "codex" and argv[index + 1] == "resume" and argv[index + 2] == "--last":
+            session_id = codex_session_for(cwd)
+            # No session for this directory → start Codex fresh here rather than
+            # resuming some unrelated project's last session.
+            replacement = ["codex", "resume", session_id] if session_id else ["codex"]
+            return argv[:index] + replacement + argv[index + 3:]
+    return argv
+
+
 def launch_app_result(app: dict[str, Any], rift: dict[str, Any]) -> dict[str, str]:
     identity = str(app.get("id") or app.get("name") or "unknown")
     if app.get("policy") == "ensure":
@@ -909,6 +1069,7 @@ def launch_app_result(app: dict[str, Any], rift: dict[str, Any]) -> dict[str, st
     env = os.environ.copy()
     env["RIFT_NAME"] = str(rift.get("name", ""))
     env["RIFT_SLUG"] = str(rift.get("slug", ""))
+    argv = resolve_launch(argv, cwd)
     try:
         subprocess.Popen(
             argv,
@@ -952,7 +1113,7 @@ def wait_for_workspace(target_id: int, timeout: float = 2.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while True:
         workspace = current_workspace()
-        if int(workspace.get("id", 0) or 0) == target_id:
+        if numeric_id(workspace.get("id")) == target_id:
             return workspace
         if time.monotonic() >= deadline:
             raise RuntimeError(f"Timed out waiting for workspace {target_id}")
@@ -1005,6 +1166,39 @@ def open_rift(slug: str) -> dict[str, Any]:
                 "workspace": association["workspace_id"],
                 "launched": launched,
                 "failed": len(remaining),
+                "results": results,
+            }
+        # Opening an open Rift means "make it whole": anything of its own that
+        # is no longer on that workspace gets relaunched (the Claude terminal
+        # you quit comes back; Brave that is still there is left alone).
+        classes = workspace_classes()
+        present = classes.get(int(association["workspace_id"]), set()) if classes is not None else None
+        missing = []
+        for app in rift.get("apps", []):
+            app_class = str(app.get("class") or "").strip().casefold()
+            if present is None or not app_class:
+                continue
+            if app_class in present:
+                continue
+            if app.get("policy") == "ensure" and app_is_running(app):
+                continue
+            missing.append(app)
+        if missing:
+            wait_for_workspace(int(association["workspace_id"]))
+            results = [launch_app_result(app, rift) for app in missing]
+            failed_now = [result["app"] for result in results if result["status"] == "failed"]
+            launched = sum(result["status"] == "launched" for result in results)
+            if failed_now:
+                with runtime_transaction() as locked:
+                    current = (locked.get("open") or {}).get(rift["slug"])
+                    if current is not None:
+                        current["failed_apps"] = sorted(set(current.get("failed_apps", [])) | set(failed_now))
+            return {
+                "action": "partial" if failed_now else "repaired",
+                "rift": rift["slug"],
+                "workspace": association["workspace_id"],
+                "launched": launched,
+                "failed": len(failed_now),
                 "results": results,
             }
         return {"action": "focused", "rift": rift["slug"], "workspace": association["workspace_id"]}

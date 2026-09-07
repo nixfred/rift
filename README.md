@@ -11,7 +11,7 @@
 [![Omarchy plugin](https://img.shields.io/badge/Omarchy-bar%20plugin-9d7cd8?style=for-the-badge&logo=archlinux&logoColor=white)](https://omarchy.org)
 [![Hyprland](https://img.shields.io/badge/Hyprland-native-58e1ff?style=for-the-badge)](https://hypr.land)
 [![Zero deps](https://img.shields.io/badge/deps-python3%20%2B%20hyprctl-success?style=for-the-badge)](#requirements)
-[![Version](https://img.shields.io/badge/version-0.3.4-8b5cf6?style=for-the-badge)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.8-8b5cf6?style=for-the-badge)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 
 ```bash
@@ -51,7 +51,8 @@ Honesty section — this is the whole product, so here's exactly what is and isn
 |---|---|---|
 | **Terminal** (Ghostty, Kitty, Alacritty, Foot, WezTerm) | the **shell's real working directory** (not the terminal's), and the **program in the foreground** | terminal relaunched in that directory, `--hold` so it stays open |
 | **Claude Code** running in a terminal | its full argv (your wrapper flags survive) | `claude … --continue` — resumes the most recent conversation in that directory. **Yes, your Claude session comes back.** |
-| **Codex** in a terminal | that it was Codex | `codex resume --last` |
+| **Grok** (xAI CLI) in a terminal | its argv, seen through the `node …/bin/grok` wrapper | `grok … --continue` — most recent session for that directory |
+| **Codex** in a terminal | that it was Codex, and the directory | `codex resume <id>` of the newest Codex session **for that directory** (looked up in `~/.codex/sessions` at launch); fresh `codex` if none |
 | `nvim`, `hx`, `btop`, `lazygit`, `ssh host`, `tmux`, `yazi`… | argv | replayed as-is |
 | any other foreground command | recorded (shown in the entry) but **not replayed** — you get the shell in the right directory | — |
 | **GUI app** with a `.desktop` entry | the entry id | `gtk-launch <id>` (the way Omarchy launches it) |
@@ -60,7 +61,7 @@ Honesty section — this is the whole product, so here's exactly what is and isn
 | Spotify, Signal, Discord, Slack, 1Password, Bitwarden | tagged `ensure` | never launched twice; deselected by default |
 | Window geometry, monitors, tiling | **nothing, on purpose** | Hyprland tiles |
 
-A Rift is a **singleton**: opening one that is already open focuses its workspace, never launches a second copy.
+A Rift is a **singleton**, and **Open means "make it whole"**: if the Rift is open, Rift focuses its workspace and relaunches any of its own apps that are missing (quit the Claude terminal → Open brings Claude back, leaves Brave alone). A Rift counts as open only while at least one of *its* apps is still on that workspace — an unrelated leftover window doesn't fool it.
 
 ## Why it's smarter than "remember my windows"
 
@@ -102,6 +103,15 @@ Manual install:
 git clone https://github.com/nixfred/rift.git ~/.config/omarchy/plugins/nixfred.rift
 omarchy plugin enable nixfred.rift
 ```
+
+### Uninstall
+
+```bash
+omarchy plugin remove nixfred.rift          # disables + removes the plugin dir
+rm -rf ~/.config/rift ~/.local/state/rift   # your Rift definitions + runtime state (optional)
+```
+
+Rift runs no daemon and installs nothing outside those two directories and the plugin folder.
 
 ### Requirements
 
