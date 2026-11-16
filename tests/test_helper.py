@@ -38,6 +38,20 @@ class RiftHelperTests(unittest.TestCase):
             self.assertIsNotNone(body)
             self.assertIn("renaming = false", body.group(1))
 
+    def test_busy_line_has_a_label_for_every_panel_action(self):
+        # Text contract on Panel.qml (there are no QML tests): the busy line
+        # must name the action in flight, so every runAction("x", ...) call
+        # site needs a busyLabels entry, and the Text must read busyText.
+        panel = (Path(__file__).parents[1] / "Panel.qml").read_text()
+        actions = set(re.findall(r'runAction\("(\w+)"', panel))
+        block = re.search(r"busyLabels: \(\{(.*?)\}\)", panel, re.DOTALL)
+        self.assertIsNotNone(block)
+        labelled = set(re.findall(r'"(\w+)":\s*"[^"]+"', block.group(1)))
+        self.assertTrue(actions)
+        self.assertEqual(actions, labelled)
+        self.assertIn("text: root.busyText", panel)
+        self.assertNotIn('actionProcess.running ? "Opening the Rift…"', panel)
+
     def test_save_records_selected_apps_and_workspace_association(self):
         apps = [
             {"id": "editor", "name": "Editor", "selected": True},

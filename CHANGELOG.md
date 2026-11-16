@@ -2,6 +2,13 @@
 
 All notable changes to Rift. The version shown in the panel header (`RIFTS vX.Y.Z`) and bar tooltip is the one in `manifest.json`; tests keep them in lockstep.
 
+## v0.3.9 — 2026-11-16 · The busy line tells the truth
+
+- **The busy line names the action in flight** (#25, "busy messages reflect the active action"): deleting, renaming, saving, updating, reverting, starting a fresh workspace and toggling startup/help all used to say "Opening the Rift…". Each now says what it is doing; an action without a label falls back to "Working…"
+- A test keeps `busyLabels` in step with every `runAction()` call site, so a new action cannot ship with the wrong words
+- `Panel.qml` reads `Commons.Color` (qualified), the way the stock Omarchy 4.5 shell does. No behaviour change; it also retires an uncommitted copy of this exact edit that had been living in the installed plugin on vic since 2026-10-18
+- Checked while here: Rift has no animation, canvas or polling in idle. Its only repeating timer runs while the panel is open on the save form. It is not a source of idle quickshell CPU
+
 ## v0.3.8 — 2026-08-22 · Grok is a first-class coding AI
 
 - Programs running under an interpreter (`node …/@xai-official/grok/bin/grok --yolo`, bun/deno/python scripts) are captured as the script they are (`grok`) when that name is on PATH, and replayed as the user-facing command

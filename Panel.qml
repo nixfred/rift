@@ -12,7 +12,7 @@ Panel {
   ipcTarget: "nixfred.rift"
   manageIpc: false
 
-  readonly property string riftVersion: "0.3.8"  // keep in lockstep with manifest.json (tests enforce)
+  readonly property string riftVersion: "0.3.9"  // keep in lockstep with manifest.json (tests enforce)
   property var anchorItem: null
   property var hostWidget: null
   property string helperPath: ""
@@ -42,6 +42,22 @@ Panel {
   readonly property bool canWrite: !stale && !actionProcess.running
   onLiveWorkspaceIdChanged: if (opened) { stateStale = true; refresh() }
   readonly property string noAppsError: "Open at least one application before saving this Rift"
+  // What the busy line says while a helper action runs, keyed by the first
+  // argument of runAction(). A test keeps this in step with every call site.
+  readonly property var busyLabels: ({
+    "open": "Opening the Rift…",
+    "new": "Creating a fresh workspace…",
+    "save": "Saving the Rift…",
+    "update": "Updating the Rift…",
+    "revert": "Reverting the Rift…",
+    "rename": "Renaming the Rift…",
+    "delete": "Deleting the Rift…",
+    "startup": "Changing the startup setting…",
+    "help": "Changing the help setting…"
+  })
+  readonly property string busyText: actionProcess.running
+    ? (busyLabels[pendingAction] || "Working…")
+    : "Reading this workspace…"
 
   readonly property var barIdentity: hostWidget || root
   readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
@@ -1105,7 +1121,7 @@ Panel {
           Text {
             visible: actionProcess.running || stateProcess.running
             width: parent.width
-            text: actionProcess.running ? "Opening the Rift…" : "Reading this workspace…"
+            text: root.busyText
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
