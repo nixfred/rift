@@ -44,6 +44,12 @@ class RiftHelperTests(unittest.TestCase):
         # site needs a busyLabels entry, and the Text must read busyText.
         panel = (Path(__file__).parents[1] / "Panel.qml").read_text()
         actions = set(re.findall(r'runAction\("(\w+)"', panel))
+        # Every call must use a literal action name, or the label check above
+        # could not see it. `(?!\))` skips prose like "runAction()"; the -1 is
+        # the `function runAction(action, args)` definition itself.
+        calls = len(re.findall(r'\brunAction\((?!\))', panel)) - 1
+        self.assertEqual(calls, len(re.findall(r'runAction\("\w+"', panel)),
+                         "runAction must be called with a literal action name")
         block = re.search(r"busyLabels: \(\{(.*?)\}\)", panel, re.DOTALL)
         self.assertIsNotNone(block)
         labelled = set(re.findall(r'"(\w+)":\s*"[^"]+"', block.group(1)))
